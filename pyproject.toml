@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "maia-gateway"
+version = "0.1.0"
+description = "Open camera gateway for video analytics: GStreamer ingest, hardware decode, a shared-memory frame bus, event clips and a control API."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Jema" }]
+keywords = ["video-analytics", "gstreamer", "rtsp", "mediamtx", "camera", "shared-memory", "computer-vision"]
+# GStreamer and its Python bindings (PyGObject) come from the system: see the README.
+dependencies = [
+    "maia-ring @ git+https://github.com/jemaia-elwrose/maia-ring@v0.1.2",
+    "numpy>=1.24",
+    "pydantic>=2.7",
+    "pyyaml>=6",
+    "redis>=5",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+infer = ["maia-infer @ git+https://github.com/jemaia-elwrose/maia-infer@v0.4.0"]
+dev = ["pytest>=8", "ruff==0.17.5"]
+
+[project.scripts]
+maia-gateway = "maia_gateway.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/maia_gateway"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B904"]

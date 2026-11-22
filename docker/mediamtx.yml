@@ -1,0 +1,16 @@
+# MediaMTX for maia-gateway: the gateway adds one path per camera through the API.
+logLevel: info
+api: true
+apiAddress: :9997          # reachable inside the compose network only (not published)
+rtspAddress: :8554
+rtmp: false
+srt: false
+hls: true
+hlsAddress: :8888
+webrtc: true
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+# Browsers on other machines need the host's address to reach WebRTC, e.g. [192.168.1.20]
+webrtcAdditionalHosts: []
+paths:
+  all_others:

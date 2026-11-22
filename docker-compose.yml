@@ -1,0 +1,56 @@
+# docker compose up --build                      # MediaMTX + Redis + gateway + a simulated camera
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build   # NVIDIA GPU decode
+#
+# Then: http://localhost:8080/docs (API), http://localhost:8889/sim-1/ (live view),
+#       maia-gateway cameras / curl localhost:8080/cameras
+#
+# Rings live in the host's shared memory (ipc: host), so pipelines and maia-infer workers
+# on this machine can read frames in place. Set MAIA_IPC=private to isolate the gateway.
+x-gateway: &gateway
+  build: { context: ., dockerfile: docker/Dockerfile }
+  image: maia-gateway:local
+  environment:
+    MAIA_REDIS_URL: redis://redis:6379/0
+    MAIA_MEDIAMTX_API: http://mediamtx:9997
+    MAIA_MEDIAMTX_RTSP: rtsp://mediamtx:8554
+    MAIA_PUBLIC_HOST: ${MAIA_PUBLIC_HOST:-localhost}
+    MAIA_API_KEY: ${MAIA_API_KEY:-}
+  ports: ["8080:8080"]
+  volumes:
+    - ./docker/cameras.yml:/config/cameras.yml:ro
+    - ./clips:/clips
+  ipc: ${MAIA_IPC:-host}
+  depends_on: [redis, mediamtx]
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:6379:6379"]   # pipelines on this host read the frame index here
+    restart: unless-stopped
+
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.4
+    volumes: ["./docker/mediamtx.yml:/mediamtx.yml:ro"]
+    ports:
+      - "8554:8554"        # RTSP
+      - "8888:8888"        # HLS
+      - "8889:8889"        # WebRTC
+      - "8189:8189/udp"    # WebRTC media
+    restart: unless-stopped
+
+  # A synthetic H.264 camera published to MediaMTX, so the stack works with no hardware.
+  camera-sim:
+    build: { context: ., dockerfile: docker/Dockerfile }
+    image: maia-gateway:local
+    entrypoint: ["gst-launch-1.0", "-q"]
+    command: >-
+      videotestsrc is-live=true pattern=ball ! video/x-raw,width=1280,height=720,framerate=25/1
+      ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast key-int-max=50
+      ! h264parse ! rtspclientsink location=rtsp://mediamtx:8554/sim protocols=tcp
+    depends_on: [mediamtx]
+    restart: unless-stopped
+
+  gateway:
+    <<: *gateway

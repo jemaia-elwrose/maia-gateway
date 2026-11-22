@@ -1,0 +1,11 @@
+# NVIDIA GPU decoding (needs the NVIDIA Container Toolkit):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# More than one GPU: MAIA_GPUS=2 (cameras go to the least-loaded GPU).
+services:
+  gateway:
+    environment:
+      MAIA_GPUS: ${MAIA_GPUS:-1}
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu, video, compute, utility] }]

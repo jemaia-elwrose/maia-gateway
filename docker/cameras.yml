@@ -1,0 +1,14 @@
+# Cameras the gateway adds (or updates) on start. Add your own: an RTSP URL is pulled
+# through MediaMTX once, and is then watchable at http://<host>:8889/<camera>/ (WebRTC).
+cameras:
+  sim-1:                                  # the simulated camera from docker compose
+    source: rtsp://mediamtx:8554/sim
+    sampling: {mode: fps, fps: 5}
+    clips: {pre_s: 5, post_s: 10}
+
+  # gate-1:
+  #   source: rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101
+  #   steps:
+  #     - crop: [0.0, 0.3, 1.0, 1.0]
+  #     - resize: [1280, 720]
+  #   sampling: {mode: motion, fps: 10}

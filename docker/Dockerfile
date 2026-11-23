@@ -26,7 +26,11 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install ".[infer]" \
  && python -c "from maia_gateway.ingest import decoders; import maia_ring, maia_infer; \
-print('ok: decoders', decoders.report()['cpu'])"
+print('ok: decoders', decoders.report()['cpu'])" \
+ && rm -rf /root/.cache/gstreamer-1.0
+# ^ The check above makes GStreamer scan its plugins and cache the result. The build has no
+#   GPU, so NVIDIA's plugin registers no decoders; a cached registry would keep them hidden
+#   at run time even with a GPU. Without the cache, the first start scans with the GPU there.
 
 EXPOSE 8080
 CMD ["maia-gateway", "serve", "--config", "/config/cameras.yml"]

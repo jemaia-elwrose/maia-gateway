@@ -50,3 +50,12 @@ def test_yaml_config(tmp_path):
     f.write_text("cameras:\n  Gate_1:\n    source: rtsp://10.0.0.21/s\n")
     with pytest.raises(ValidationError):
         GatewayConfig.load(f)
+
+
+def test_nvidia_decoder_per_gpu():
+    pytest.importorskip("gi")
+    from maia_gateway.ingest.decoders import nvidia_element
+
+    # NVIDIA's plugin fixes the GPU per element; the device cannot be set as a property
+    assert [nvidia_element("h264", g) for g in (None, 0, 1)] == ["nvh264dec", "nvh264dec", "nvh264device1dec"]
+    assert nvidia_element("h265", 3) == "nvh265device3dec"

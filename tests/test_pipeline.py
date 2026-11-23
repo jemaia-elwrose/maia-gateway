@@ -146,3 +146,41 @@ def test_clip_from_the_encoded_stream(tmp_path):
     duration, width, height = probe(done[0].path)
     assert (width, height) == (320, 240)
     assert 2.4 <= duration <= 4.0  # 1.5 s before (from the previous key frame) + 1.0 s after
+
+
+def caps_of(profile):
+    from maia_gateway.ingest.gst import Gst
+
+    return Gst.Caps.from_string(f"video/x-h264,stream-format=avc,alignment=au,profile={profile}")
+
+
+def test_decoder_profile_check():
+    from maia_gateway.ingest.decoders import accepts
+
+    if not accepts("openh264dec", None):
+        pytest.skip("openh264dec not installed")
+    assert accepts("openh264dec", caps_of("high"))
+    assert not accepts("openh264dec", caps_of("high-4:4:4"))  # lists its profiles: no 4:4:4
+    assert accepts("avdec_h264", caps_of("high-4:4:4"))  # lists none: decodes everything
+
+
+def test_auto_skips_a_decoder_that_cannot_handle_the_stream(monkeypatch):
+    from maia_gateway.ingest import decoders
+
+    if not decoders.available("openh264dec"):
+        pytest.skip("openh264dec not installed")
+    # stand-in for a GPU decoder without 4:4:4: put openh264dec first in line
+    monkeypatch.setitem(decoders.DECODERS, "cpu", {"h264": ["openh264dec", "avdec_h264"]})
+    monkeypatch.setattr(decoders, "AUTO_ORDER", ["cpu"])
+    assert decoders.choose("h264", "auto", caps=caps_of("high"))[1] == "openh264dec"
+    kind, element, notes = decoders.choose("h264", "auto", caps=caps_of("high-4:4:4"))
+    assert element == "avdec_h264" and "openh264dec cannot decode h264 profile high-4:4:4" in notes[0]
+
+
+def test_444_stream_from_a_real_encoder_still_decodes():
+    from maia_gateway.ingest import decoders
+
+    if not decoders.available("x264enc"):
+        pytest.skip("x264enc needed to make a 4:4:4 stream")
+    ingest, *_ = run({"source": "test://ball?size=320x240&fps=25&format=Y444", "sampling": {"fps": 5}}, 2)
+    assert ingest.stats.written >= 5 and ingest.stats.decoder == "avdec_h264"

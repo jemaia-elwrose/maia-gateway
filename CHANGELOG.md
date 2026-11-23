@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3
+- NVIDIA: the GPU is chosen by decoder element (`nvh264dec` for GPU 0, `nvh264device1dec`
+  for GPU 1, ...). Setting `cuda-device-id` failed: the property is read-only.
+- Decoders are matched to the stream's profile before use: a stream a hardware decoder
+  cannot handle (NVDEC: no 4:4:4; some GPUs: no 10-bit) goes to the next decoder, with a
+  note in the camera's status, instead of failing to negotiate.
+- Test cameras (`test://`) always produce 4:2:0, like real cameras; left free, x264 on
+  GStreamer 1.20 picked High 4:4:4, which NVDEC rejected. `?format=Y444` makes such a stream
+  on purpose.
+- Docker GPU: the image no longer ships GStreamer's plugin cache. It was written at build
+  time without a GPU, so NVIDIA's decoders stayed hidden at run time even with one.
+- `maia-gateway decoders` also shows the Python, PyGObject and GStreamer in use and where
+  plugins load from; link errors name the reason and the stream format.
+
 ## 0.1.2
 - Apple VideoToolbox: a parser before every decoder converts the byte-stream H.264/H.265
   (which the clip branch needs) into the format the decoder accepts; `vtdec_hw` takes AVC

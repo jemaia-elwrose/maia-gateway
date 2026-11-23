@@ -147,9 +147,20 @@ def main(argv: list[str] | None = None) -> None:
         with _api(args) as api:
             _show(api.post(f"/cameras/{args.id}/events", json={"label": args.label}))
     elif args.cmd == "decoders":
-        from .ingest.decoders import report
+        import gi
 
-        print(json.dumps(report(), indent=2))
+        from .ingest.decoders import report
+        from .ingest.gst import Gst
+
+        core = Gst.Registry.get().find_plugin("coreelements")
+        info = {
+            "python": sys.executable,
+            "gi": gi.__file__,
+            "gstreamer": Gst.version_string(),
+            "plugins_from": os.path.dirname(core.get_filename()) if core else None,
+            "decoders": report(),
+        }
+        print(json.dumps(info, indent=2))
     elif args.cmd == "bench":
         rows = bench(args.seconds, args.size, ["h264"])
         print(f"{'decoder':<14}{'kind':<8}{'size':<11}{'frames/s':>9}")

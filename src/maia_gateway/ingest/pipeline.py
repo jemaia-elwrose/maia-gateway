@@ -64,6 +64,7 @@ class Stats:
     started_ns: int = field(default_factory=time.time_ns)
     last_frame_ns: int | None = None
     error: str | None = None
+    notes: list = field(default_factory=list)
     _rate_window: deque = field(default_factory=lambda: deque(maxlen=50))
 
     @property
@@ -85,6 +86,9 @@ def test_source(url: str) -> str:
     q = {k: v[0] for k, v in parse_qs(u.query).items()}
     width, height = (int(x) for x in q.get("size", "1280x720").split("x"))
     fps, gop, pattern = int(q.get("fps", 25)), int(q.get("gop", 50)), u.netloc or "ball"
+    # 4:2:0 like real cameras; left free, some encoders pick 4:4:4, which most hardware
+    # decoders (NVDEC included) cannot decode. ?format=Y444 makes such a stream on purpose.
+    fmt = q.get("format", "I420")
     encoder = next((e for e in TEST_ENCODERS if decoders.available(e)), None)
     if encoder is None:
         raise RuntimeError("test:// sources need an H.264 encoder (x264enc, openh264enc or vtenc_h264)")
@@ -95,7 +99,7 @@ def test_source(url: str) -> str:
     }.get(encoder, f"{encoder} max-keyframe-interval={gop}")
     return (
         f"videotestsrc is-live=true pattern={pattern} ! video/x-raw,width={width},height={height},"
-        f"framerate={fps}/1 ! videoconvert ! {settings} ! h264parse"
+        f"framerate={fps}/1 ! videoconvert ! video/x-raw,format={fmt} ! {settings} ! h264parse"
     )
 
 
@@ -183,8 +187,12 @@ class Ingest:
 
     def _link_rest(self, pad: Gst.Pad, codec: str) -> None:
         p = self.profile
-        kind, decoder_name = decoders.choose(codec, p.decode)
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        kind, decoder_name, notes = decoders.choose(codec, p.decode, self.gpu, caps)
         self.stats.codec, self.stats.decoder, self.stats.decoder_kind = codec, decoder_name, kind
+        for note in notes:  # e.g. a 4:4:4 stream the GPU cannot decode: the CPU takes it
+            log.warning("[%s] %s; using %s", self.camera_id, note, decoder_name)
+        self.stats.notes = notes
         sync = not self._live  # files play at their own pace, like a camera
 
         parse = self._make(f"{codec}parse", config_interval=-1)
@@ -202,8 +210,6 @@ class Ingest:
         # decoder accepts: Apple's VideoToolbox, for one, takes only AVC
         reparse = self._make(f"{codec}parse")
         decoder = self._make(decoder_name)
-        if kind == "nvidia" and self.gpu is not None:
-            decoder.set_property("cuda-device-id", self.gpu)
         chain: list[Gst.Element] = [q_dec, reparse, decoder]
         if p.sampling.mode == "iframes":
             # decode only key frames: everything else is dropped before the decoder
@@ -245,13 +251,21 @@ class Ingest:
 
         for a, b in [(parse, bytestream), (bytestream, tee), (q_pkt, packets), *zip(chain, chain[1:], strict=False)]:
             if not a.link(b):
-                raise RuntimeError(f"cannot link {a.get_factory().get_name()} to {b.get_factory().get_name()}")
+                raise RuntimeError(
+                    f"cannot link {a.get_factory().get_name()} to {b.get_factory().get_name()} "
+                    f"(no common format; GStreamer {Gst.version_string()})"
+                )
         for element in [parse, bytestream, tee, q_pkt, packets, *chain]:
             element.sync_state_with_parent()
         tee.request_pad_simple("src_%u").link(q_pkt.get_static_pad("sink"))
         tee.request_pad_simple("src_%u").link(q_dec.get_static_pad("sink"))
-        if pad.link(parse.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
-            raise RuntimeError("cannot link the parsed stream")
+        result = pad.link(parse.get_static_pad("sink"))
+        if result != Gst.PadLinkReturn.OK:
+            caps = pad.get_current_caps() or pad.query_caps(None)
+            raise RuntimeError(
+                f"cannot link the parsed stream ({result.value_nick}); stream caps: {caps.to_string()[:200]}; "
+                f"GStreamer {Gst.version_string()} from {Gst.Registry.get().find_plugin('coreelements').get_filename()}"
+            )
         self.stats.state = "running"
         log.info("[%s] %s via %s (%s)", self.camera_id, codec, decoder_name, kind)
 

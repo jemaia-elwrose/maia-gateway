@@ -166,7 +166,7 @@ class Supervisor:
             "gpu": cam.gpu,
             "restarts": cam.restarts,
             "last_exit": cam.last_exit,
-            "notes": cam.notes,
+            "notes": cam.notes + stats.get("notes", []),
             "error": cam.error if cam.relay_pending else stats.get("error"),
             "stats": stats,
             "profile": cam.profile.model_dump(),

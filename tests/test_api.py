@@ -188,3 +188,40 @@ def test_rtsp_camera_through_mediamtx(redis_url, tmp_path, mediamtx, rtsp_camera
         assert hls.status_code == 200 and "#EXTM3U" in hls.text  # people can watch the relayed camera
         assert client.delete("/cameras/gate-1").status_code == 204
         assert httpx.get(f"{mediamtx['api']}/v3/paths/get/gate-1").status_code == 404  # path removed too
+
+
+class FlakyMediaMTX(NoMediaMTX):
+    """MediaMTX that is still starting: the first attempt to create a path fails."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def add(self, camera_id, source):
+        from maia_gateway.mediamtx import MediaMTXError
+
+        self.calls += 1
+        if self.calls == 1:
+            raise MediaMTXError("MediaMTX API unreachable at http://mediamtx:9997: connection refused")
+
+    def ingest_url(self, camera_id):
+        return "test://ball?size=320x240&fps=25&gop=25"  # stands in for the relayed stream
+
+
+def test_mediamtx_down_does_not_stop_the_gateway(redis_url, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from maia_gateway import bus
+    from maia_gateway.api.app import create_app
+    from maia_gateway.config import CameraProfile
+    from maia_gateway.settings import Settings
+    from maia_gateway.supervisor import Supervisor
+
+    bus.connect(redis_url).flushdb()
+    settings = Settings(redis_url=redis_url, clips_dir=str(tmp_path))
+    mtx = FlakyMediaMTX()
+    config = {"relayed": CameraProfile(source="rtsp://10.0.0.21/stream1")}
+    with TestClient(create_app(settings, supervisor=Supervisor(settings, mtx), cameras=config)) as client:
+        cam = client.get("/cameras/relayed").json()  # the gateway started despite MediaMTX
+        assert cam["state"] == "waiting-for-mediamtx" and "unreachable" in cam["error"]
+        cam = wait(lambda: running(client, "relayed"))  # retried in the background, then running
+        assert mtx.calls == 2 and cam["error"] is None

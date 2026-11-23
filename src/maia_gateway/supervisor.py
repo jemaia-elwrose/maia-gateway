@@ -6,6 +6,8 @@
   decode sessions per GPU. Cameras go to the least-loaded GPU; when every GPU is full, an
   ``auto`` camera decodes on the CPU instead and a ``nvidia`` camera is refused.
 - The camera registry lives in Redis, so cameras come back when the gateway restarts.
+- MediaMTX unreachable (still starting, restarting, misconfigured) never stops the gateway:
+  a relayed camera waits as ``waiting-for-mediamtx`` and its path is retried with backoff.
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ class Camera:
     next_start: float = 0.0
     last_exit: int | None = None
     error: str | None = None
+    relay_pending: bool = False  # the MediaMTX path is not created yet
+    relay_tries: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -54,7 +58,9 @@ class Supervisor:
     def __init__(self, settings: Settings, mediamtx: MediaMTX | None = None) -> None:
         self.settings = settings
         self.r = bus.connect(settings.redis_url)
-        self.mtx = mediamtx or MediaMTX(settings.mediamtx_api, settings.mediamtx_rtsp, settings.public_host)
+        self.mtx = mediamtx or MediaMTX(
+            settings.mediamtx_api, settings.mediamtx_rtsp, settings.public_host, settings.view_ports
+        )
         self.cameras: dict[str, Camera] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -86,13 +92,29 @@ class Supervisor:
                 raise AdmissionError(f"this gateway is full ({self.settings.max_cameras} cameras, MAIA_MAX_CAMERAS)")
             cam = Camera(camera_id, profile)
             self._place(cam)
-            if profile.relayed:
-                self.mtx.add(camera_id, profile.source)
             if persist:
                 self.r.hset(bus.REGISTRY, camera_id, profile.model_dump_json())
             self.cameras[camera_id] = cam
-            self._start_process(cam)
+            if profile.relayed:
+                cam.relay_pending = True
+                self._try_relay(cam)
+            else:
+                self._start_process(cam)
             return cam
+
+    def _try_relay(self, cam: Camera) -> None:
+        """Create the camera's MediaMTX path; start its pipeline once that works."""
+        try:
+            self.mtx.add(cam.id, cam.profile.source)
+        except MediaMTXError as exc:
+            cam.relay_tries += 1
+            cam.error = str(exc)
+            cam.next_start = time.monotonic() + min(30.0, 2.0 ** min(cam.relay_tries, 5))
+            if cam.relay_tries == 1:
+                log.warning("camera %s waits for MediaMTX: %s", cam.id, exc)
+            return
+        cam.relay_pending, cam.relay_tries, cam.error = False, 0, None
+        self._start_process(cam)
 
     def update(self, camera_id: str, profile: CameraProfile) -> Camera:
         with self._lock:
@@ -106,7 +128,7 @@ class Supervisor:
                 raise KeyError(f"no camera {camera_id}")
             self._stop_process(cam)
             if forget:
-                if cam.profile.relayed:
+                if cam.profile.relayed and not cam.relay_pending:
                     try:
                         self.mtx.remove(camera_id)
                     except MediaMTXError as exc:
@@ -119,13 +141,22 @@ class Supervisor:
             cam = self.cameras[camera_id]
             self._stop_process(cam)
             cam.restarts, cam.next_start = 0, 0.0
-            self._start_process(cam)
+            if cam.relay_pending:
+                cam.relay_tries = 0
+                self._try_relay(cam)
+            else:
+                self._start_process(cam)
 
     def status(self, camera_id: str) -> dict:
         cam = self.cameras[camera_id]
         raw = self.r.get(bus.STATS.format(camera_id))
         stats = json.loads(raw) if raw else {}
-        state = stats.get("state", "starting") if cam.running else ("restarting" if cam.next_start else "stopped")
+        if cam.relay_pending:
+            state = "waiting-for-mediamtx"
+        elif cam.running:
+            state = stats.get("state", "starting")
+        else:
+            state = "restarting" if cam.next_start else "stopped"
         return {
             "id": cam.id,
             "state": state,
@@ -136,6 +167,7 @@ class Supervisor:
             "restarts": cam.restarts,
             "last_exit": cam.last_exit,
             "notes": cam.notes,
+            "error": cam.error if cam.relay_pending else stats.get("error"),
             "stats": stats,
             "profile": cam.profile.model_dump(),
         }
@@ -204,4 +236,7 @@ class Supervisor:
                         log.warning("camera %s exited (%s) after %.0fs; restart in %.0fs",
                                     cam.id, cam.last_exit, uptime, delay)  # fmt: skip
                     elif cam.process is None and cam.next_start and now >= cam.next_start:
-                        self._start_process(cam)
+                        if cam.relay_pending:
+                            self._try_relay(cam)
+                        else:
+                            self._start_process(cam)

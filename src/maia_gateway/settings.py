@@ -18,6 +18,14 @@ class Settings:
     mediamtx_rtsp: str = field(default_factory=lambda: _env("MAIA_MEDIAMTX_RTSP", "rtsp://localhost:8554"))
     #: host name people use to watch cameras (for the links in GET /cameras/{id}/view)
     public_host: str = field(default_factory=lambda: _env("MAIA_PUBLIC_HOST", "localhost"))
+    #: ports people use to watch, if MediaMTX's are mapped to others on the host
+    view_ports: dict = field(
+        default_factory=lambda: {
+            "rtsp": int(_env("MAIA_VIEW_RTSP_PORT", "8554")),
+            "hls": int(_env("MAIA_VIEW_HLS_PORT", "8888")),
+            "webrtc": int(_env("MAIA_VIEW_WEBRTC_PORT", "8889")),
+        }
+    )
     clips_dir: str = field(default_factory=lambda: _env("MAIA_CLIPS_DIR", "./clips"))
     #: if set, every API call needs the header X-API-Key with this value
     api_key: str | None = field(default_factory=lambda: os.environ.get("MAIA_API_KEY") or None)

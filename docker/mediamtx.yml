@@ -1,8 +1,8 @@
 # MediaMTX for maia-gateway: the gateway adds one path per camera through the API.
 logLevel: info
 api: true
-apiAddress: :9997          # reachable inside the compose network only (not published)
-rtspAddress: :8554
+apiAddress: :9997          # never published to the host: only containers on this network reach it
+rtspAddress: :8554         # inside the network; the host port is set in docker-compose.yml
 rtmp: false
 srt: false
 hls: true
@@ -12,5 +12,24 @@ webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
 # Browsers on other machines need the host's address to reach WebRTC, e.g. [192.168.1.20]
 webrtcAdditionalHosts: []
+
+authInternalUsers:
+  # anyone may publish and watch (put credentials here for production cameras and viewers)
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+  # the control API: localhost and private networks, i.e. the gateway on the compose network.
+  # (MediaMTX's default allows localhost only, which refuses the gateway's container.)
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    permissions:
+      - action: api
+      - action: metrics
+
 paths:
   all_others:

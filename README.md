@@ -75,6 +75,14 @@ curl -XPOST localhost:8080/cameras -H 'content-type: application/json' -d '{
 
 NVIDIA GPU decoding (NVIDIA Container Toolkit): `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build`.
 
+A port already taken on the host? Change only the host side; inside the compose network
+everything keeps its standard port: `MAIA_RTSP_PORT=7554 docker compose up` (also
+`MAIA_API_PORT`, `MAIA_HLS_PORT`, `MAIA_WEBRTC_PORT`, `MAIA_REDIS_PORT`).
+
+If MediaMTX is not reachable yet (still starting, or misconfigured), the gateway starts
+anyway: relayed cameras show `waiting-for-mediamtx` with the reason in `GET /cameras` and
+are retried in the background.
+
 ## Reading frames in a pipeline
 
 ```python
@@ -213,7 +221,17 @@ brew install gstreamer pygobject3 redis
 python3 -m venv --system-site-packages .venv && . .venv/bin/activate   # with Homebrew's python3
 
 pip install -e ".[dev,infer]"
-maia-gateway serve --config docker/cameras.yml     # plus MediaMTX for relayed RTSP cameras
+redis-server --daemonize yes                           # or: brew services start redis
+maia-gateway serve --config examples/cameras-local.yml # synthetic cameras, no MediaMTX needed
+```
+
+For relayed RTSP cameras and live viewing, run MediaMTX too (a single binary from its
+[releases](https://github.com/bluenviron/mediamtx/releases)) with `api: true` in its
+config, and point `MAIA_MEDIAMTX_API` / `MAIA_MEDIAMTX_RTSP` at it. MediaMTX allows its
+API from localhost only by default, which is fine when both run on the same machine:
+
+```bash
+./mediamtx docker/mediamtx.yml
 ```
 
 ## Measured, not assumed
@@ -244,7 +262,7 @@ src/maia_gateway/
   cli.py               maia-gateway serve | cameras | event | decoders | bench
 examples/              a detection pipeline; a Triton shared-memory sketch
 docker/                image (CPU + NVIDIA), MediaMTX config, cameras
-tests/                 32 tests: real GStreamer pipelines, Redis, MediaMTX and RTSP
+tests/                 33 tests: real GStreamer pipelines, Redis, MediaMTX and RTSP
 ```
 
 ## Development

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from ..mediamtx import MediaMTXError
 from ..settings import Settings
 from ..supervisor import AdmissionError, Supervisor
 
+log = logging.getLogger("maia_gateway.api")
 CLIP_ID = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}(\.mp4)?$")
 
 
@@ -51,11 +53,14 @@ def create_app(settings: Settings | None = None, supervisor: Supervisor | None =
         app.state.sup = sup
         sup.start()
         for camera_id, profile in (cameras or {}).items():  # from --config: added or updated
-            if camera_id in sup.cameras:
-                if sup.cameras[camera_id].profile != profile:
-                    sup.update(camera_id, profile)
-            else:
-                sup.add(camera_id, profile)
+            try:
+                if camera_id in sup.cameras:
+                    if sup.cameras[camera_id].profile != profile:
+                        sup.update(camera_id, profile)
+                else:
+                    sup.add(camera_id, profile)
+            except Exception as exc:  # one bad camera must not keep the gateway down
+                log.error("camera %s from the config was not added: %s", camera_id, exc)
         yield
         sup.shutdown()
 

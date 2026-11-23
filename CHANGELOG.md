@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1
+- Docker: MediaMTX refused the gateway's API calls (its default allows the API from
+  localhost only). `docker/mediamtx.yml` now allows the API from private networks; the API
+  port is never published. `MAIA_MEDIAMTX_API` also accepts `http://user:pass@host:9997`.
+- MediaMTX being unreachable no longer stops the gateway: relayed cameras show
+  `waiting-for-mediamtx` with the reason and are retried with backoff. A camera from
+  `--config` that cannot be added is logged and skipped.
+- Host ports are set in docker compose (`MAIA_RTSP_PORT=7554 docker compose up`); viewing
+  links follow them (`MAIA_VIEW_*_PORT`).
+- `examples/cameras-local.yml` for native runs without MediaMTX (Mac hardware decoding).
+
 ## 0.1.0
 - First release: camera gateway with a shared-memory frame bus for video analytics.
 - Ingest: one process per camera; RTSP (relayed through MediaMTX), file and synthetic

@@ -3,6 +3,8 @@ through MediaMTX's control API; ingest and viewers then read that path."""
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 import httpx
 
 
@@ -11,17 +13,36 @@ class MediaMTXError(RuntimeError):
 
 
 class MediaMTX:
-    def __init__(self, api: str, rtsp: str, public_host: str = "localhost", timeout: float = 3.0) -> None:
-        self.api = api.rstrip("/")
+    def __init__(
+        self,
+        api: str,
+        rtsp: str,
+        public_host: str = "localhost",
+        ports: dict[str, int] | None = None,
+        timeout: float = 3.0,
+    ) -> None:
+        # credentials may ride in the URL (http://user:pass@mediamtx:9997) for a MediaMTX
+        # user with the "api" permission; they are sent as basic auth, never logged
+        parts = urlsplit(api.rstrip("/"))
+        auth = (parts.username or "", parts.password or "") if parts.username else None
+        host = parts.hostname + (f":{parts.port}" if parts.port else "")
+        self.api = urlunsplit((parts.scheme, host, parts.path, "", ""))
         self.rtsp = rtsp.rstrip("/")
         self.public_host = public_host
-        self.http = httpx.Client(timeout=timeout)
+        self.ports = {"rtsp": 8554, "hls": 8888, "webrtc": 8889, **(ports or {})}
+        self.http = httpx.Client(timeout=timeout, auth=auth)
 
     def _call(self, method: str, path: str, json: dict | None = None) -> httpx.Response:
         try:
             res = self.http.request(method, f"{self.api}{path}", json=json)
         except httpx.HTTPError as exc:
             raise MediaMTXError(f"MediaMTX API unreachable at {self.api}: {exc}") from exc
+        if res.status_code == 401:
+            raise MediaMTXError(
+                f"MediaMTX refused the API call ({method} {path}): by default it allows its API from localhost "
+                "only. Allow the gateway's address under authInternalUsers (action: api) in mediamtx.yml, "
+                "or give the gateway a user: MAIA_MEDIAMTX_API=http://user:pass@host:9997"
+            )
         if res.status_code >= 400:
             raise MediaMTXError(f"MediaMTX {method} {path}: {res.status_code} {res.text.strip()}")
         return res
@@ -59,9 +80,9 @@ class MediaMTX:
         return f"{self.rtsp}/{camera_id}"
 
     def view(self, camera_id: str) -> dict[str, str]:
-        h = self.public_host
+        h, p = self.public_host, self.ports
         return {
-            "webrtc": f"http://{h}:8889/{camera_id}/",
-            "hls": f"http://{h}:8888/{camera_id}/index.m3u8",
-            "rtsp": f"rtsp://{h}:8554/{camera_id}",
+            "webrtc": f"http://{h}:{p['webrtc']}/{camera_id}/",
+            "hls": f"http://{h}:{p['hls']}/{camera_id}/index.m3u8",
+            "rtsp": f"rtsp://{h}:{p['rtsp']}/{camera_id}",
         }

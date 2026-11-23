@@ -1,0 +1,16 @@
+# Cameras for a native run with no MediaMTX (e.g. on a Mac, to try hardware decoding):
+#   maia-gateway serve --config examples/cameras-local.yml
+# test:// and file:// sources are read directly by the gateway; RTSP cameras can be read
+# directly too with relay: false (no live view then).
+cameras:
+  synth-1:
+    source: test://ball?size=1920x1080&fps=25&gop=50
+    sampling: {mode: fps, fps: 5}
+  synth-motion:
+    source: test://ball?size=1280x720&fps=25&gop=50
+    steps:
+      - resize: [640, 360]
+    sampling: {mode: motion, fps: 10}
+  # my-camera:
+  #   source: rtsp://user:pass@192.168.1.64/stream1
+  #   relay: false

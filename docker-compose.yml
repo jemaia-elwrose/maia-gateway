@@ -4,6 +4,10 @@
 # Then: http://localhost:8080/docs (API), http://localhost:8889/sim-1/ (live view),
 #       maia-gateway cameras / curl localhost:8080/cameras
 #
+# Ports are published on 127.0.0.1 only. To reach the stack from other machines set
+# MAIA_BIND=0.0.0.0 and MAIA_API_KEY (Docker's published ports bypass host firewalls such as
+# ufw, so an open cloud security group is enough for scanners to find the API).
+#
 # Ports busy on the host? Change only the host side, e.g. MAIA_RTSP_PORT=7554 docker compose up
 # (inside the network everything keeps MediaMTX's standard ports).
 #
@@ -21,7 +25,7 @@ x-gateway: &gateway
     MAIA_VIEW_RTSP_PORT: ${MAIA_RTSP_PORT:-8554}
     MAIA_VIEW_HLS_PORT: ${MAIA_HLS_PORT:-8888}
     MAIA_VIEW_WEBRTC_PORT: ${MAIA_WEBRTC_PORT:-8889}
-  ports: ["${MAIA_API_PORT:-8080}:8080"]
+  ports: ["${MAIA_BIND:-127.0.0.1}:${MAIA_API_PORT:-8080}:8080"]
   volumes:
     - ./docker/cameras.yml:/config/cameras.yml:ro
     - ./clips:/clips
@@ -40,10 +44,11 @@ services:
     image: bluenviron/mediamtx:1.21.4
     volumes: ["./docker/mediamtx.yml:/mediamtx.yml:ro"]
     ports:
-      - "${MAIA_RTSP_PORT:-8554}:8554"        # RTSP
-      - "${MAIA_HLS_PORT:-8888}:8888"         # HLS
-      - "${MAIA_WEBRTC_PORT:-8889}:8889"      # WebRTC
-      - "8189:8189/udp"    # WebRTC media
+      - "${MAIA_BIND:-127.0.0.1}:${MAIA_RTSP_PORT:-8554}:8554"        # RTSP
+      - "${MAIA_BIND:-127.0.0.1}:${MAIA_HLS_PORT:-8888}:8888"         # HLS
+      - "${MAIA_BIND:-127.0.0.1}:${MAIA_WEBRTC_PORT:-8889}:8889"      # WebRTC
+      - "${MAIA_BIND:-127.0.0.1}:8189:8189/udp"    # WebRTC media
+      - "${MAIA_BIND:-127.0.0.1}:8189:8189"        # WebRTC media over TCP
     restart: unless-stopped
 
   # A synthetic H.264 camera published to MediaMTX, so the stack works with no hardware.

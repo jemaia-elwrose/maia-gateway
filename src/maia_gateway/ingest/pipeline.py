@@ -1,7 +1,7 @@
 """One camera's ingest pipeline.
 
     source ─ parsebin ─ h26xparse ─ tee ─┬─ queue ─ appsink "packets"     (encoded: clips, GOP, I-frame marks)
-                                          └─ queue ─ decoder ─(rate probe)─ flip ─ crop ─ scale
+                                          └─ queue ─ h26xparse ─ decoder ─(rate probe)─ flip ─ crop ─ scale
                                                      ─ enhance ─ convert ─ appsink "frames"  (into the ring)
 
 Frames are thinned to the target rate by a probe right after the decoder, using their
@@ -198,10 +198,13 @@ class Ingest:
         packets.connect("new-sample", self._on_packet_sample)
 
         q_dec = self._make("queue", max_size_buffers=60, max_size_time=0, max_size_bytes=0)
+        # a second parser converts byte-stream (needed by the clip branch) into whatever this
+        # decoder accepts: Apple's VideoToolbox, for one, takes only AVC
+        reparse = self._make(f"{codec}parse")
         decoder = self._make(decoder_name)
         if kind == "nvidia" and self.gpu is not None:
             decoder.set_property("cuda-device-id", self.gpu)
-        chain: list[Gst.Element] = [q_dec, decoder]
+        chain: list[Gst.Element] = [q_dec, reparse, decoder]
         if p.sampling.mode == "iframes":
             # decode only key frames: everything else is dropped before the decoder
             decoder.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._drop_delta_units)

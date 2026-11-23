@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+- Apple VideoToolbox: a parser before every decoder converts the byte-stream H.264/H.265
+  (which the clip branch needs) into the format the decoder accepts; `vtdec_hw` takes AVC
+  only and stalled without it.
+- docker compose publishes every port on 127.0.0.1 by default; `MAIA_BIND=0.0.0.0` (with
+  `MAIA_API_KEY`) exposes them. Docker's published ports bypass host firewalls, and an
+  exposed API was found by internet scanners within minutes.
+- Live view through tunnels: `GET /cameras/{id}/view` adds the HLS player page (plain HTTP);
+  WebRTC also accepts media over TCP 8189 when UDP is blocked.
+- README: macOS install with `pip install pygobject`.
+
 ## 0.1.1
 - Docker: MediaMTX refused the gateway's API calls (its default allows the API from
   localhost only). `docker/mediamtx.yml` now allows the API from private networks; the API

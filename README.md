@@ -58,7 +58,8 @@ That starts MediaMTX, Redis, the gateway and a simulated camera, `sim-1`. Then:
 ```bash
 curl localhost:8080/cameras                        # state, decoder, fps, GOP per camera
 curl localhost:8080/cameras/sim-1/snapshot -o snap.jpg
-open http://localhost:8889/sim-1/                  # live view in the browser (WebRTC)
+open http://localhost:8889/sim-1/                  # live view (WebRTC), on the same machine or LAN
+open http://localhost:8888/sim-1/                  # live view (HLS): works through SSH/VS Code tunnels
 curl -XPOST localhost:8080/cameras/sim-1/events -H 'content-type: application/json' \
      -d '{"label": "person"}'                       # cuts a clip: 5 s before, 10 s after
 curl localhost:8080/clips                          # ...and the clip, when it is written
@@ -74,6 +75,12 @@ curl -XPOST localhost:8080/cameras -H 'content-type: application/json' -d '{
 ```
 
 NVIDIA GPU decoding (NVIDIA Container Toolkit): `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build`.
+
+Every port is published on `127.0.0.1` only. To reach the stack from other machines, run
+with `MAIA_BIND=0.0.0.0` **and** `MAIA_API_KEY=...`: Docker's published ports bypass host
+firewalls like ufw, and an exposed API is found by internet scanners within minutes. WebRTC
+from other machines also needs the host's address in `webrtcAdditionalHosts`
+(`docker/mediamtx.yml`) and port 8189 reachable; through a tunnel, use the HLS page.
 
 A port already taken on the host? Change only the host side; inside the compose network
 everything keeps its standard port: `MAIA_RTSP_PORT=7554 docker compose up` (also
@@ -217,8 +224,9 @@ sudo apt install python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gst
 python3 -m venv --system-site-packages .venv && . .venv/bin/activate
 
 # macOS (Apple Silicon: hardware decoding works natively)
-brew install gstreamer pygobject3 redis
-python3 -m venv --system-site-packages .venv && . .venv/bin/activate   # with Homebrew's python3
+brew install gstreamer gobject-introspection pkg-config cairo redis
+python3 -m venv .venv && . .venv/bin/activate
+pip install pygobject          # the GStreamer bindings, built for this venv's Python
 
 pip install -e ".[dev,infer]"
 redis-server --daemonize yes                           # or: brew services start redis

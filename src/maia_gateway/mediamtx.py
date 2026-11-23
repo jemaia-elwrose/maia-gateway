@@ -82,7 +82,8 @@ class MediaMTX:
     def view(self, camera_id: str) -> dict[str, str]:
         h, p = self.public_host, self.ports
         return {
-            "webrtc": f"http://{h}:{p['webrtc']}/{camera_id}/",
+            "webrtc": f"http://{h}:{p['webrtc']}/{camera_id}/",  # lowest latency; media over UDP/TCP 8189
+            "hls_page": f"http://{h}:{p['hls']}/{camera_id}/",  # plain HTTP: works through any tunnel
             "hls": f"http://{h}:{p['hls']}/{camera_id}/index.m3u8",
             "rtsp": f"rtsp://{h}:{p['rtsp']}/{camera_id}",
         }

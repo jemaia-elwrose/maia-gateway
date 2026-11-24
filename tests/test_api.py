@@ -33,6 +33,9 @@ class NoMediaMTX:
     def ingest_url(self, camera_id):
         raise AssertionError("not relayed")
 
+    def own_path(self, source):
+        return None
+
     def view(self, camera_id):
         return {}
 
@@ -174,7 +177,10 @@ def test_rtsp_camera_through_mediamtx(redis_url, tmp_path, mediamtx, rtsp_camera
         redis_url=redis_url, clips_dir=str(tmp_path), mediamtx_api=mediamtx["api"], mediamtx_rtsp=mediamtx["rtsp"]
     )
     with TestClient(create_app(settings, supervisor=Supervisor(settings))) as client:
-        profile = {"source": rtsp_camera, "sampling": {"fps": 5}}
+        # 127.0.0.2 is this machine too, but not an address of the gateway's MediaMTX: it
+        # stands in for a camera elsewhere, which MediaMTX relays
+        camera = rtsp_camera.replace("127.0.0.1", "127.0.0.2")
+        profile = {"source": camera, "sampling": {"fps": 5}}
         assert client.post("/cameras", json={"id": "gate-1", "profile": profile}).status_code == 201
         cam = wait(lambda: running(client, "gate-1"), timeout=20)
         assert cam["relayed"] and cam["stats"]["width"] == 1280 and cam["restarts"] == 0
@@ -225,3 +231,127 @@ def test_mediamtx_down_does_not_stop_the_gateway(redis_url, tmp_path):
         assert cam["state"] == "waiting-for-mediamtx" and "unreachable" in cam["error"]
         cam = wait(lambda: running(client, "relayed"))  # retried in the background, then running
         assert mtx.calls == 2 and cam["error"] is None
+
+
+def test_file_published_to_mediamtx_keeps_playing_across_loops(mediamtx, tmp_path):
+    """A video file watched like a camera: the encoded packets go to MediaMTX, and looping
+    must not restart timestamps (HLS muxers reject that, and the stream would stall)."""
+    import subprocess
+    import threading
+
+    import httpx
+
+    from maia_gateway.config import CameraProfile
+    from maia_gateway.ingest.pipeline import Ingest, test_source
+
+    video = tmp_path / "one-second.mp4"
+    src = test_source("test://ball?size=320x240&fps=25&gop=25").replace("is-live=true", "num-buffers=25")
+    subprocess.run(
+        ["gst-launch-1.0", "-q", *src.split(), "!", "mp4mux", "!", "filesink", f"location={video}"], check=True
+    )
+    profile = CameraProfile(source=f"file://{video}", publish=True, sampling={"fps": 5})
+    ingest = Ingest("pub", profile, publish_url=f"{mediamtx['rtsp']}/pub")
+    t = threading.Thread(target=ingest.run)
+    t.start()
+    hls = f"http://127.0.0.1:{mediamtx['hls_port']}/pub/index.m3u8"
+    codes = []
+    for _ in range(4):  # ~4 loops of the 1 s file
+        time.sleep(1.2)
+        codes.append(httpx.get(hls, follow_redirects=True, timeout=5).status_code)
+    ingest.stop()
+    t.join(10)
+    assert ingest.stats.state == "stopped" and ingest.stats.written >= 15
+    assert codes[-1] == 200, codes
+
+
+def test_file_played_once_ends_and_is_not_restarted(gateway, tmp_path):
+    import subprocess
+
+    from maia_gateway.ingest.pipeline import test_source
+
+    client, sup = gateway
+    video = tmp_path / "once.mp4"
+    src = test_source("test://ball?size=320x240&fps=25&gop=25").replace("is-live=true", "num-buffers=25")
+    cmd = ["gst-launch-1.0", "-q", *src.split(), "!", "mp4mux", "!", "filesink", f"location={video}"]
+    subprocess.run(cmd, check=True)
+    profile = {"source": f"file://{video}", "loop": False}
+    assert client.post("/cameras", json={"id": "once", "profile": profile}).status_code == 201
+    cam = wait(lambda: (c := client.get("/cameras/once").json())["state"] == "ended" and c)
+    time.sleep(2)  # the supervisor must leave it alone
+    cam = client.get("/cameras/once").json()
+    assert cam["state"] == "ended" and cam["restarts"] == 0 and cam["last_exit"] == 3
+
+    from maia_gateway.bus import FrameStream
+
+    stream = FrameStream("once", r=sup.r)
+    t0 = time.monotonic()
+    assert list(stream.follow(block_ms=200)) == []  # the camera has ended: the stream ends too
+    assert time.monotonic() - t0 < 2 and stream.camera_state() == "ended"
+
+
+def test_file_without_usable_video_is_failed_not_restarted(gateway, tmp_path):
+    import subprocess
+
+    client, sup = gateway
+    video = tmp_path / "vp9.webm"
+    cmd = [
+        "gst-launch-1.0",
+        "-q",
+        "videotestsrc",
+        "num-buffers=25",
+        "!",
+        "vp9enc",
+        "deadline=1",
+        "!",
+        "webmmux",
+        "!",
+        "filesink",
+        f"location={video}",
+    ]
+    subprocess.run(cmd, check=True)
+    assert client.post("/cameras", json={"id": "vp9", "profile": {"source": f"file://{video}"}}).status_code == 201
+    wait(lambda: client.get("/cameras/vp9").json()["state"] == "failed")
+    time.sleep(2)
+    cam = client.get("/cameras/vp9").json()
+    assert cam["state"] == "failed" and cam["restarts"] == 0 and cam["last_exit"] == 4
+    assert "video/x-vp9" in (cam.get("error") or str(cam))
+
+
+@pytest.mark.parametrize("width", [640, 606, 605])
+def test_snapshot_of_any_width(width):
+    import numpy as np
+
+    from maia_gateway.snapshot import jpeg
+
+    for pixfmt, shape in (("bgr", (48, width, 3)), ("gray", (48, width))):
+        data = jpeg(np.zeros(shape, np.uint8), pixfmt)
+        assert data[:2] == b"\xff\xd8"  # a JPEG, even when rows need padding
+
+
+def test_stream_already_on_our_mediamtx_is_read_not_relayed(redis_url, tmp_path, mediamtx, rtsp_camera):
+    """A webcam published into the gateway's own MediaMTX: relaying it would replace the
+    publisher's path with one that pulls from itself, and drop the webcam."""
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from maia_gateway import bus
+    from maia_gateway.api.app import create_app
+    from maia_gateway.settings import Settings
+    from maia_gateway.supervisor import Supervisor
+
+    bus.connect(redis_url).flushdb()
+    settings = Settings(
+        redis_url=redis_url, clips_dir=str(tmp_path), mediamtx_api=mediamtx["api"], mediamtx_rtsp=mediamtx["rtsp"]
+    )
+    with TestClient(create_app(settings, supervisor=Supervisor(settings))) as client:
+        source = rtsp_camera.replace("127.0.0.1", "localhost")  # as a person would type it
+        profile = {"source": source, "sampling": {"fps": 5}}
+        assert client.post("/cameras", json={"id": "webcam", "profile": profile}).status_code == 201
+        cam = wait(lambda: running(client, "webcam"), timeout=20)
+        assert not cam["relayed"] and cam["viewable"] and cam["mediamtx_path"] == "upstream"
+        assert client.get("/cameras/webcam/view").json()["rtsp"].endswith("/upstream")
+        time.sleep(2)
+        path = httpx.get(f"{mediamtx['api']}/v3/paths/get/upstream").json()
+        assert path["ready"] and path["source"]["type"] == "rtspSession"  # the publisher is still there
+        assert client.delete("/cameras/webcam").status_code == 204
+        assert httpx.get(f"{mediamtx['api']}/v3/paths/get/upstream").status_code == 200  # left alone

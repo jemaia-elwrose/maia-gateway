@@ -184,3 +184,77 @@ def test_444_stream_from_a_real_encoder_still_decodes():
         pytest.skip("x264enc needed to make a 4:4:4 stream")
     ingest, *_ = run({"source": "test://ball?size=320x240&fps=25&format=Y444", "sampling": {"fps": 5}}, 2)
     assert ingest.stats.written >= 5 and ingest.stats.decoder == "avdec_h264"
+
+
+def test_file_plays_once_with_loop_false(video_file):
+    ingest, refs, _, _ = run({"source": f"file://{video_file}", "loop": False, "sampling": {"fps": 10}}, 2.5)
+    assert ingest.stats.state == "ended" and 8 <= len(refs) <= 12  # 1 s of video at 10 fps, then stop
+
+
+def test_clip_across_a_file_loop_is_valid(video_file, tmp_path):
+    """Running time keeps increasing when a file loops, so a clip spanning the loop muxes."""
+    from test_clips import probe
+
+    from maia_gateway.config import CameraProfile
+    from maia_gateway.ingest.clips import ClipRecorder
+    from maia_gateway.ingest.pipeline import Ingest
+
+    done, holder = [], {}
+    ingest = Ingest("loopclip", CameraProfile(source=f"file://{video_file}"), on_packet=lambda p: holder["r"].add(p))
+    holder["r"] = ClipRecorder("loopclip", tmp_path, 1.0, 1.0, caps=lambda: ingest.caps_string, on_done=done.append)
+    t = threading.Thread(target=ingest.run)
+    t.start()
+    time.sleep(1.6)  # the 1 s file has looped once
+    holder["r"].event()
+    time.sleep(1.5)
+    ingest.stop()
+    t.join(10)
+    assert done and done[0].status == "done", done and done[0].error
+    assert 1.5 <= probe(done[0].path)[0] <= 3.5
+
+
+def _mux_with_audio(path, video: str):
+    """A Matroska file with ``video`` plus a Vorbis audio track, as phones and cameras export."""
+    subprocess.run(
+        [
+            "gst-launch-1.0",
+            "-q",
+            *video.split(),
+            "!",
+            "queue",
+            "!",
+            "matroskamux",
+            "name=m",
+            "!",
+            "filesink",
+            f"location={path}",
+            "audiotestsrc",
+            "num-buffers=40",
+            "!",
+            "audioconvert",
+            "!",
+            "vorbisenc",
+            "!",
+            "queue",
+            "!",
+            "m.",
+        ],
+        check=True,
+    )
+    return path
+
+
+def test_file_with_an_audio_track_still_plays(tmp_path):
+    from maia_gateway.ingest.pipeline import test_source
+
+    src = test_source("test://ball?size=320x240&fps=25&gop=25").replace("is-live=true", "num-buffers=25")
+    path = _mux_with_audio(tmp_path / "av.mkv", src)
+    ingest, refs, _, _ = run({"source": f"file://{path}", "sampling": {"fps": 10}}, 2.2)
+    assert ingest.stats.codec == "h264" and len(refs) >= 15  # audio ignored, video looped
+
+
+def test_file_without_h264_or_h265_fails_for_good(tmp_path):
+    path = _mux_with_audio(tmp_path / "vp9.webm", "videotestsrc num-buffers=25 ! vp9enc deadline=1")
+    ingest, refs, _, _ = run({"source": f"file://{path}"}, 1.5)
+    assert ingest.stats.state == "failed" and not refs
+    assert "video/x-vp9" in ingest.stats.error and "ffmpeg" in ingest.stats.error

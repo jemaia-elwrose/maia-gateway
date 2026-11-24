@@ -86,6 +86,11 @@ A port already taken on the host? Change only the host side; inside the compose 
 everything keeps its standard port: `MAIA_RTSP_PORT=7554 docker compose up` (also
 `MAIA_API_PORT`, `MAIA_HLS_PORT`, `MAIA_WEBRTC_PORT`, `MAIA_REDIS_PORT`).
 
+Frames are read in place from the host's shared memory. The gateway in Docker runs as root,
+so it gives each ring to group 1000, the first user's group on most Linux machines; if
+`id -g` prints something else, start with `MAIA_RING_GID=$(id -g) docker compose up`.
+Otherwise scripts on the host stop with `PermissionError` when they open a ring.
+
 If MediaMTX is not reachable yet (still starting, or misconfigured), the gateway starts
 anyway: relayed cameras show `waiting-for-mediamtx` with the reason in `GET /cameras` and
 are retried in the background.
@@ -112,10 +117,84 @@ for frame in frames.follow():  # the newest frame each time
 | Shared between replicas | `follow(group="counting", consumer="a")` | several copies of one pipeline split a camera's frames (Redis consumer group) |
 | References only | `follow(read=False)` | forward `FrameRef`s to a worker or Triton without touching the pixels |
 
+`examples/check_by_reference.py` proves the path end to end: a broker, a worker and the
+script in separate processes, each frame sent once by reference and once with its pixels:
+
+```
+sent as    worker got                same pixels    bytes sent   p50 ms
+reference  read-only shared view     yes                   325     2.19
+pixels     its own copy              yes             6,220,957     8.15
+```
+
+(1080p, 20 frames, 2-core x86 VM.) The worker reads the very pixels the gateway decoded,
+from shared memory, and 325 bytes travel instead of 6.2 MB.
+
 `examples/detect_from_bus.py` is a complete pipeline (YOLO through maia-infer, an event and a
 clip when a person appears). `examples/triton_shm_sketch.py` shows the Triton path: the ring is
 registered with Triton as system shared memory and each request names a slot. It is a sketch,
 not yet tested against a Triton server.
+
+## Video files as cameras
+
+A video file works like a camera, the way NVIDIA VST serves recorded video:
+
+```yaml
+cameras:
+  demo-video:
+    source: file:///videos/demo.mp4   # docker compose mounts ./videos at /videos
+    loop: true          # false: play once; the camera then shows "ended" and stays stopped
+    publish: true       # also watch it live: http://localhost:8888/demo-video/ (HLS) or WebRTC
+    sampling: {fps: 5}
+```
+
+Files play in real time, like a camera, not as fast as they decode. Looping is seamless:
+timestamps keep increasing across loops, so pipelines, clips and the published stream see
+one continuous camera. `publish` sends the file's encoded stream to MediaMTX as is (no
+re-encode). One limit: a file with B-frames hiccups in HLS at each loop; for viewing,
+re-encode it once without them: `ffmpeg -i in.mp4 -c:v libx264 -bf 0 -g 50 demo.mp4`.
+Most camera recordings have no B-frames.
+
+## A real RTSP camera to test with
+
+Public test streams come and go, and random public cameras may be someone's private camera.
+A camera you control is better, and you have one: your laptop's webcam, published as RTSP by
+MediaMTX (macOS shown; on Linux use `-f v4l2 -i /dev/video0`):
+
+MediaMTX is one binary. Download it once (Apple Silicon shown; pick your platform on the
+[releases page](https://github.com/bluenviron/mediamtx/releases)):
+
+```bash
+curl -L -o mediamtx.tar.gz \
+  https://github.com/bluenviron/mediamtx/releases/download/v1.21.4/mediamtx_v1.21.4_darwin_arm64.tar.gz
+tar xzf mediamtx.tar.gz mediamtx && rm mediamtx.tar.gz
+```
+
+Terminal 1, MediaMTX (this repo's config turns its API on; the gateway needs it):
+
+```bash
+./mediamtx docker/mediamtx.yml
+```
+
+Terminal 2, the webcam (macOS asks for camera permission the first time):
+
+```bash
+ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -pixel_format nv12 -i "0" -c:v libx264 \
+  -preset veryfast -tune zerolatency -pix_fmt yuv420p -bf 0 -g 60 \
+  -f rtsp rtsp://localhost:8554/webcam
+```
+
+Terminal 3, the gateway:
+
+```bash
+maia-gateway cameras add webcam rtsp://localhost:8554/webcam --fps 5
+```
+
+The webcam already is a stream on the gateway's MediaMTX, so the gateway reads that path
+as it is (`relayed: false`) and its live view is the `webcam` path. "Connection refused"
+from ffmpeg means MediaMTX is not running yet. If you moved MediaMTX's
+RTSP port (for example to 7554 because 8554 was taken), use it in both URLs.
+
+A phone app that publishes RTSP works the same way, and so does any IP camera on your network.
 
 ## Camera profiles
 
@@ -138,6 +217,8 @@ cameras:
     ring: {slots: 32}
     clips: {pre_s: 5, post_s: 10}
     relay: true             # pull through MediaMTX (live view); false = ingest reads the camera itself
+    publish: false          # files and test sources: push to MediaMTX for a live view
+    loop: true              # files: loop (true) or play once (false)
 ```
 
 Change a profile while the camera runs with `PATCH /cameras/{id}` (only the fields you send);
@@ -270,7 +351,7 @@ src/maia_gateway/
   cli.py               maia-gateway serve | cameras | event | decoders | bench
 examples/              a detection pipeline; a Triton shared-memory sketch
 docker/                image (CPU + NVIDIA), MediaMTX config, cameras
-tests/                 33 tests: real GStreamer pipelines, Redis, MediaMTX and RTSP
+tests/                 41 tests: real GStreamer pipelines, Redis, MediaMTX and RTSP
 ```
 
 ## Development

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.4
+- Video files as cameras, like VST: `loop: false` plays a file once (the camera then shows
+  `ended` and is not restarted); `publish: true` pushes a file or test source into MediaMTX,
+  without re-encoding, so it can be watched live like a camera. `./videos` is mounted at
+  `/videos` in docker compose.
+- Files loop seamlessly with segment seeks, and every timestamp (rate, I-frame marks,
+  clips, ring) is running time, which keeps increasing across loops: the published stream
+  stays continuous and clips may span a loop. Known limit: files with B-frames hiccup in
+  HLS at each loop (re-encode with `-bf 0` for viewing).
+- Fix: camera processes' exit codes never reached the supervisor (multiprocessing ignores a
+  target's return value); they now go through `sys.exit`.
+- Clips: one clock per clip and strictly increasing decode times (B-frames, missing DTS).
+- Files with audio or other extra tracks play (the tracks are ignored). A source with no
+  H.264/H.265 video (a VP9 phone export, say) is marked `failed`, with the tracks found and
+  an ffmpeg command to convert it, instead of restarting forever.
+- Docker: rings are given to group `MAIA_RING_GID` (default 1000), so scripts on the host can
+  read the frames of a gateway running as root (maia-ring 0.1.3).
+- Fix: snapshots failed for frames whose rows are not a multiple of 4 bytes (e.g. 606 px wide
+  BGR, a portrait video); GStreamer pads raw rows to 4 bytes.
+- Fix: a camera whose source is already a stream on the gateway's own MediaMTX (a webcam
+  published with ffmpeg) was relayed into a path that pulled from itself, which dropped the
+  publisher. Such a source is now read as it is, and viewed on its own path.
+- README: webcam test steps for macOS (download MediaMTX, then three terminals).
+- `examples/check_by_reference.py`: proves frames travel by reference from the gateway to a
+  maia-infer worker (325 bytes instead of 6.2 MB per 1080p frame, same pixels).
+
 ## 0.1.3
 - NVIDIA: the GPU is chosen by decoder element (`nvh264dec` for GPU 0, `nvh264device1dec`
   for GPU 1, ...). Setting `cuda-device-id` failed: the property is read-only.

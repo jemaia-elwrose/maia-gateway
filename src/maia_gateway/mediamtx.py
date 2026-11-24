@@ -76,6 +76,19 @@ class MediaMTX:
         except MediaMTXError:
             return None
 
+    def own_path(self, source: str) -> str | None:
+        """The path name if ``source`` is a stream on this MediaMTX already (a webcam published
+        with ffmpeg, say). Relaying it would turn that path into one that pulls from itself and
+        drop the publisher, so such cameras are read as they are."""
+        s = urlsplit(source)
+        path = s.path.strip("/")
+        if s.scheme not in ("rtsp", "rtsps") or not path:
+            return None
+        ours = urlsplit(self.rtsp)
+        hosts = {ours.hostname, "localhost", "127.0.0.1", "::1", self.public_host}
+        ports = {ours.port or 554, self.ports["rtsp"]}
+        return path if s.hostname in hosts and (s.port or 554) in ports else None
+
     def ingest_url(self, camera_id: str) -> str:
         return f"{self.rtsp}/{camera_id}"
 

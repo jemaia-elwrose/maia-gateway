@@ -110,6 +110,9 @@ class FrameStream:
         - ``every=True``: every frame in order; frames already overwritten in the ring are
           counted in ``missed`` instead.
         - ``group=...``: a Redis consumer group, so replicas of one pipeline split the frames.
+
+        The stream ends when the camera does (a file played once: ``ended``; a source that
+        cannot work: ``failed``), or after ``idle_timeout_s`` without frames.
         """
         last_id = "$"
         if group:
@@ -129,6 +132,8 @@ class FrameStream:
             if not entries:
                 if idle_timeout_s is not None and time.monotonic() - idle_since > idle_timeout_s:
                     return
+                if self.camera_state() in ("ended", "failed"):
+                    return
                 continue
             idle_since = time.monotonic()
             last_id = entries[-1][0]
@@ -143,6 +148,11 @@ class FrameStream:
                     self.missed += 1
                     continue
                 yield item
+
+    def camera_state(self) -> str | None:
+        """The camera's state as its ingest process last reported it (None if unknown)."""
+        raw = self.r.get(STATS.format(self.camera_id))
+        return json.loads(raw).get("state") if raw else None
 
     def close(self) -> None:
         self.rings.close()

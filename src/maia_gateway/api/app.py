@@ -143,11 +143,9 @@ def create_app(settings: Settings | None = None, supervisor: Supervisor | None =
     @app.get("/cameras/{camera_id}/view")
     def view(camera_id: str) -> dict:
         cam = camera_or_404(camera_id)
-        if not cam.profile.relayed:
-            raise HTTPException(
-                409, "live view needs an RTSP camera with relay: true (file and test sources are not relayed)"
-            )
-        return sup().mtx.view(camera_id)
+        if not cam.viewable:
+            raise HTTPException(409, "live view needs an RTSP camera with relay: true, or publish: true for files")
+        return sup().mtx.view(cam.mtx_path)
 
     # ----------------------------------------------------------------- clips
     @app.post("/cameras/{camera_id}/events", status_code=202)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 import time
 
@@ -16,10 +17,18 @@ from ..config import CameraProfile
 
 log = logging.getLogger("maia_gateway.camera")
 
-EXIT_OK, EXIT_FAILED = 0, 1
+EXIT_OK, EXIT_FAILED, EXIT_ENDED, EXIT_FATAL = 0, 1, 3, 4  # FATAL: retrying cannot help
 
 
-def run_camera(camera_id: str, profile_json: str, url: str, redis_url: str, clips_dir: str, gpu: int | None) -> int:
+def run_camera(
+    camera_id: str,
+    profile_json: str,
+    url: str,
+    redis_url: str,
+    clips_dir: str,
+    gpu: int | None,
+    publish_url: str | None = None,
+) -> int:
     logging.basicConfig(level=logging.INFO, format=f"%(asctime)s %(levelname)s [{camera_id}] %(message)s")
     from .clips import ClipRecorder  # imported here: GStreamer loads in the camera process only
     from .pipeline import Ingest
@@ -35,7 +44,9 @@ def run_camera(camera_id: str, profile_json: str, url: str, redis_url: str, clip
     def on_packet(packet) -> None:
         recorder.add(packet)
 
-    ingest = Ingest(camera_id, profile, url=url, publish=publisher.publish, on_packet=on_packet, gpu=gpu)
+    ingest = Ingest(
+        camera_id, profile, url=url, publish=publisher.publish, on_packet=on_packet, gpu=gpu, publish_url=publish_url
+    )
     recorder = ClipRecorder(
         camera_id,
         clips_dir,
@@ -82,8 +93,19 @@ def run_camera(camera_id: str, profile_json: str, url: str, redis_url: str, clip
     stop.set()
     recorder.flush()
     try:
-        r.set(bus.STATS.format(camera_id), json.dumps(ingest.stats.as_dict()), ex=60)
+        final = state in ("ended", "failed")  # kept until the camera is restarted or removed
+        r.set(bus.STATS.format(camera_id), json.dumps(ingest.stats.as_dict()), ex=None if final else 60)
     except Exception:
         pass
     log.info("camera stopped: %s%s", state, f" ({ingest.stats.error})" if ingest.stats.error else "")
-    return EXIT_OK if state in ("stopped", "ended") else EXIT_FAILED
+    if state == "ended":
+        return EXIT_ENDED
+    if state == "failed":
+        return EXIT_FATAL
+    return EXIT_OK if state == "stopped" else EXIT_FAILED
+
+
+def main(*args) -> None:
+    """Process entry point: the exit code tells the supervisor how the camera stopped
+    (a function's return value is ignored by multiprocessing, so it is passed to sys.exit)."""
+    sys.exit(run_camera(*args))

@@ -101,6 +101,11 @@ class CameraProfile(_Strict):
     #: pull the camera through MediaMTX (one connection to the camera, live view for people);
     #: when false, or for file:// and test:// sources, ingest reads the source directly
     relay: bool = True
+    #: file:// and test:// sources: push the encoded stream into MediaMTX as well (no
+    #: re-encode), so a video file can be watched live like a camera (WebRTC, HLS, RTSP)
+    publish: bool = False
+    #: file:// sources: start again at the end (true), or play once and stop (false)
+    loop: bool = True
 
     @field_validator("source")
     @classmethod
@@ -123,6 +128,11 @@ class CameraProfile(_Strict):
     @property
     def relayed(self) -> bool:
         return self.relay and self.source.startswith(("rtsp://", "rtsps://"))
+
+    @property
+    def viewable(self) -> bool:
+        """Watchable through MediaMTX: relayed cameras, and published files/test sources."""
+        return self.relayed or (self.publish and self.source.startswith(("file://", "test://")))
 
 
 def check_camera_id(camera_id: str) -> str:

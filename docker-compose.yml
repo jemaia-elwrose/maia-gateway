@@ -13,6 +13,9 @@
 #
 # Rings live in the host's shared memory (ipc: host), so pipelines and maia-infer workers
 # on this machine can read frames in place. Set MAIA_IPC=private to isolate the gateway.
+# The gateway runs as root, so rings are given to group MAIA_RING_GID (default 1000, the
+# first user's group on most Linux machines) for scripts on the host to read; use
+# MAIA_RING_GID=$(id -g) docker compose up if yours differs (`id -g` prints it).
 x-gateway: &gateway
   build: { context: ., dockerfile: docker/Dockerfile }
   image: maia-gateway:local
@@ -22,6 +25,7 @@ x-gateway: &gateway
     MAIA_MEDIAMTX_RTSP: rtsp://mediamtx:8554
     MAIA_PUBLIC_HOST: ${MAIA_PUBLIC_HOST:-localhost}
     MAIA_API_KEY: ${MAIA_API_KEY:-}
+    MAIA_RING_GID: ${MAIA_RING_GID:-1000}
     MAIA_VIEW_RTSP_PORT: ${MAIA_RTSP_PORT:-8554}
     MAIA_VIEW_HLS_PORT: ${MAIA_HLS_PORT:-8888}
     MAIA_VIEW_WEBRTC_PORT: ${MAIA_WEBRTC_PORT:-8889}
@@ -29,6 +33,7 @@ x-gateway: &gateway
   volumes:
     - ./docker/cameras.yml:/config/cameras.yml:ro
     - ./clips:/clips
+    - ./videos:/videos:ro        # video files used as cameras (file:///videos/...)
   ipc: ${MAIA_IPC:-host}
   depends_on: [redis, mediamtx]
   restart: unless-stopped

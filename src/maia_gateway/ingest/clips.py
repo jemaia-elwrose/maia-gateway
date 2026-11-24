@@ -174,14 +174,19 @@ def write_mp4(packets: list[Packet], caps: str, path: str, timeout_s: float = 30
     src.set_property("caps", Gst.Caps.from_string(caps))
     pipeline.get_by_name("out").set_property("location", path)
     pipeline.set_state(Gst.State.PLAYING)
-    base = _first_valid(packets, "dts") or _first_valid(packets, "pts")
+    # one clock for the whole clip: stream (running) time if every packet has it, else arrival
+    use_pts = all(p.pts != NONE for p in packets)
+    base = min((p.dts if p.dts != NONE else p.pts) for p in packets) if use_pts else packets[0].arrival_ns
+    last_dts = -1
     for i, p in enumerate(packets):
         buf = Gst.Buffer.new_wrapped(p.data)
-        if base is not None and p.pts != NONE:
-            buf.pts = p.pts - base
-            buf.dts = (p.dts - base) if p.dts != NONE else buf.pts
-        else:  # no stream timestamps: fall back to arrival times
-            buf.pts = buf.dts = p.arrival_ns - packets[0].arrival_ns
+        if use_pts:
+            pts = p.pts - base
+            dts = (p.dts if p.dts != NONE else p.pts) - base
+        else:
+            pts = dts = p.arrival_ns - base
+        dts = max(dts, last_dts + 1)  # muxers need increasing decode times
+        buf.pts, buf.dts, last_dts = max(pts, dts), dts, dts
         buf.duration = p.duration
         if not p.key:
             buf.set_flags(Gst.BufferFlags.DELTA_UNIT)
@@ -194,7 +199,3 @@ def write_mp4(packets: list[Packet], caps: str, path: str, timeout_s: float = 30
         raise RuntimeError("muxing timed out")
     if msg.type == Gst.MessageType.ERROR:
         raise RuntimeError(msg.parse_error()[0].message)
-
-
-def _first_valid(packets: list[Packet], attr: str) -> int | None:
-    return next((getattr(p, attr) for p in packets if getattr(p, attr) != NONE), None)

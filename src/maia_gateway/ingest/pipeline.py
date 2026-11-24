@@ -4,6 +4,11 @@
                                           └─ queue ─ h26xparse ─ decoder ─(rate probe)─ flip ─ crop ─ scale
                                                      ─ enhance ─ convert ─ appsink "frames"  (into the ring)
 
+Timestamps are the pipeline's *running time* everywhere (rate thinning, I-frame marks, clips,
+the ring): it keeps increasing when a file loops, where the file's own timestamps start
+again at 0. Files loop with segment seeks, without a flush, so the stream published to
+MediaMTX stays continuous too.
+
 Frames are thinned to the target rate by a probe right after the decoder, using their
 timestamps, so dropped frames never pay for conversion or scaling. (GStreamer's videorate
 element aborts on streams without frame durations, which RTSP cameras often send.)
@@ -80,6 +85,15 @@ class Stats:
         return d
 
 
+def _running(segment: Gst.Segment | None, t: int) -> int:
+    """Stream timestamp -> running time (monotonic across file loops). Can be negative: with
+    B-frames the first decode timestamps come before the start of the segment."""
+    if t == Gst.CLOCK_TIME_NONE or segment is None:
+        return t
+    sign, value = segment.to_running_time_full(Gst.Format.TIME, t)
+    return value if sign > 0 else -value if sign < 0 else Gst.CLOCK_TIME_NONE
+
+
 def test_source(url: str) -> str:
     """test://ball?size=1280x720&fps=25&gop=50 -> a live synthetic H.264 camera."""
     u = urlparse(url)
@@ -116,16 +130,18 @@ class Ingest:
         url: str | None = None,
         publish: Callable[[FrameRef], None] | None = None,
         on_packet: Callable[[Packet], None] | None = None,
-        loop_files: bool = True,
+        loop_files: bool | None = None,
         gpu: int | None = None,
+        publish_url: str | None = None,
     ) -> None:
         self.gpu = gpu
+        self.publish_url = publish_url
         self.camera_id = camera_id
         self.profile = profile
         self.url = url or profile.source
         self.publish = publish or (lambda ref: None)
         self.on_packet = on_packet or (lambda packet: None)
-        self.loop_files = loop_files
+        self.loop_files = profile.loop if loop_files is None else loop_files
         self.stats = Stats()
         self.ring: RingWriter | None = None
         self.caps_string: str | None = None  # encoded caps, for writing clips
@@ -136,6 +152,11 @@ class Ingest:
         self._last_kept_ns = 0
         self._discontinuity = True
         self._lock = threading.Lock()
+        self._dec_segment: Gst.Segment | None = None  # for running time after the decoder
+        self._segment_looping = False
+        self._streams: list[str] = []
+        self._start_phase = "playing"  # files that loop: preroll -> playing
+        self.loops = 0
         self._loop: GLib.MainLoop | None = None
         self.pipeline = self._build_source()
 
@@ -152,6 +173,7 @@ class Ingest:
             raise ValueError(f"unsupported source: {u}")
         pipeline = Gst.parse_launch(src)
         pipeline.get_by_name("pb").connect("pad-added", self._on_parsed_pad)
+        pipeline.get_by_name("pb").connect("no-more-pads", self._on_no_more_pads)
         bus = pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
@@ -174,16 +196,30 @@ class Ingest:
         caps = pad.get_current_caps() or pad.query_caps(None)
         name = caps.get_structure(0).get_name()
         codec = CODECS.get(name)
-        if codec is None:
+        self._streams.append(name)
+        if codec is None or self.stats.codec is not None:
+            # audio, subtitles, other codecs, a second video track: left unlinked. Demuxers
+            # only fail with "not-linked" when *no* track is linked; that case is _no_video().
             log.info("[%s] ignoring %s stream", self.camera_id, name)
             return
-        if self.stats.codec is not None:
-            return  # one video stream per camera
         try:
             self._link_rest(pad, codec)
         except Exception as exc:  # report through the bus so run() fails cleanly
             self.stats.error = str(exc)
             self.pipeline.post_message(Gst.Message.new_application(None, Gst.Structure.new_empty("maia-error")))
+
+    def _on_no_more_pads(self, _parsebin) -> None:
+        if self.stats.codec is None:
+            self._no_video()
+            self.pipeline.post_message(Gst.Message.new_application(None, Gst.Structure.new_empty("maia-fatal")))
+
+    def _no_video(self) -> None:
+        """Nothing we can decode: retrying will not change that, so the camera is 'failed'."""
+        found = ", ".join(self._streams) or "no streams"
+        self.stats.error = (
+            f"no H.264/H.265 video in this source (found: {found}). Cameras send H.264/H.265; "
+            "convert a file once with: ffmpeg -i in.mp4 -c:v libx264 -bf 0 -g 50 -an out.mp4"
+        )
 
     def _link_rest(self, pad: Gst.Pad, codec: str) -> None:
         p = self.profile
@@ -215,7 +251,9 @@ class Ingest:
             # decode only key frames: everything else is dropped before the decoder
             decoder.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._drop_delta_units)
         else:
-            decoder.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._rate_limit)
+            decoder.get_static_pad("src").add_probe(
+                Gst.PadProbeType.BUFFER | Gst.PadProbeType.EVENT_DOWNSTREAM, self._rate_limit
+            )
         rotate, flip = p.step(Rotate), p.step(Flip)
         if rotate and rotate.rotate:
             chain.append(self._make("videoflip", method=FLIP[rotate.rotate]))
@@ -249,16 +287,27 @@ class Ingest:
         frames.connect("new-sample", self._on_frame_sample)
         chain.append(frames)
 
-        for a, b in [(parse, bytestream), (bytestream, tee), (q_pkt, packets), *zip(chain, chain[1:], strict=False)]:
+        links = [(parse, bytestream), (bytestream, tee), (q_pkt, packets), *zip(chain, chain[1:], strict=False)]
+        extra: list[Gst.Element] = []
+        if self.publish_url:
+            # files and test sources: the same encoded packets go to MediaMTX, paced by their
+            # timestamps, so people can watch them live; nothing is re-encoded
+            q_pub = self._make("queue", max_size_buffers=0, max_size_time=0, max_size_bytes=32 << 20, leaky=2)
+            rtsp = self._make("rtspclientsink", location=self.publish_url, protocols="tcp", latency=0)
+            extra = [q_pub, rtsp]
+            links.append((q_pub, rtsp))
+        for a, b in links:
             if not a.link(b):
                 raise RuntimeError(
                     f"cannot link {a.get_factory().get_name()} to {b.get_factory().get_name()} "
                     f"(no common format; GStreamer {Gst.version_string()})"
                 )
-        for element in [parse, bytestream, tee, q_pkt, packets, *chain]:
+        for element in [parse, bytestream, tee, q_pkt, packets, *chain, *extra]:
             element.sync_state_with_parent()
         tee.request_pad_simple("src_%u").link(q_pkt.get_static_pad("sink"))
         tee.request_pad_simple("src_%u").link(q_dec.get_static_pad("sink"))
+        if extra:
+            tee.request_pad_simple("src_%u").link(extra[0].get_static_pad("sink"))
         result = pad.link(parse.get_static_pad("sink"))
         if result != Gst.PadLinkReturn.OK:
             caps = pad.get_current_caps() or pad.query_caps(None)
@@ -278,11 +327,18 @@ class Ingest:
         return Gst.PadProbeReturn.OK
 
     def _rate_limit(self, _pad, info):
-        """Keep one decoded frame per 1/fps seconds of stream time."""
+        """Keep one decoded frame per 1/fps seconds of running time."""
+        if info.type & Gst.PadProbeType.EVENT_DOWNSTREAM:
+            event = info.get_event()
+            if event.type == Gst.EventType.SEGMENT:
+                self._dec_segment = event.parse_segment().copy()
+            return Gst.PadProbeReturn.OK
         self.stats.decoded += 1
         pts = info.get_buffer().pts
         if pts == Gst.CLOCK_TIME_NONE:
             return Gst.PadProbeReturn.OK
+        if self._dec_segment is not None:
+            pts = self._dec_segment.to_running_time(Gst.Format.TIME, pts)
         interval = int(1e9 / self.profile.sampling.fps)
         if self._next_due is not None and pts < self._next_due:
             return Gst.PadProbeReturn.DROP
@@ -306,11 +362,14 @@ class Ingest:
 
     def _on_packet_sample(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")
+        if self._start_phase != "playing":
+            return Gst.FlowReturn.OK  # a looping file before its segment seek: discarded
         buf = sample.get_buffer()
         if self.caps_string is None:
             self.caps_string = sample.get_caps().to_string()
         key = not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
-        pts = buf.pts
+        segment = sample.get_segment()
+        pts, dts = (_running(segment, t) for t in (buf.pts, buf.dts))
         if key and pts != Gst.CLOCK_TIME_NONE:
             self._key_pts.append(pts)
             if self._last_key_pts is not None and pts > self._last_key_pts:
@@ -321,13 +380,15 @@ class Ingest:
         ok, info = buf.map(Gst.MapFlags.READ)
         if ok:
             try:
-                self.on_packet(Packet(time.time_ns(), pts, buf.dts, buf.duration, key, bytes(info.data)))
+                self.on_packet(Packet(time.time_ns(), pts, dts, buf.duration, key, bytes(info.data)))
             finally:
                 buf.unmap(info)
         return Gst.FlowReturn.OK
 
     def _on_frame_sample(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")
+        if self._start_phase != "playing":
+            return Gst.FlowReturn.OK
         buf = sample.get_buffer()
         if self.profile.sampling.mode == "iframes":
             self.stats.decoded += 1  # no rate probe in this mode
@@ -335,7 +396,7 @@ class Ingest:
         s = sample.get_caps().get_structure(0)
         width, height = s.get_value("width"), s.get_value("height")
         sampling = self.profile.sampling
-        pts = buf.pts
+        pts = _running(sample.get_segment(), buf.pts)
         ok, info = buf.map(Gst.MapFlags.READ)
         if not ok:
             return Gst.FlowReturn.OK
@@ -411,19 +472,57 @@ class Ingest:
         t = msg.type
         if t == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
+            if self.stats.codec is None and self._streams:  # streams found, none of them usable
+                self._no_video()
+                log.error("[%s] %s", self.camera_id, self.stats.error)
+                self.stop("failed")
+                return
             self.stats.error = f"{err.message} ({msg.src.get_name()})"
             log.error("[%s] %s | %s", self.camera_id, self.stats.error, debug)
             self.stop("error")
+        elif t == Gst.MessageType.APPLICATION and msg.get_structure().get_name() == "maia-fatal":
+            log.error("[%s] %s", self.camera_id, self.stats.error)
+            self.stop("failed")
         elif t == Gst.MessageType.APPLICATION and msg.get_structure().get_name() == "maia-error":
             log.error("[%s] %s", self.camera_id, self.stats.error)
             self.stop("error")
+        elif t == Gst.MessageType.ASYNC_DONE and self._start_phase == "preroll" and self.stats.codec:
+            # The file is linked and prerolled, nothing has played yet: switch to segment
+            # playback. The end of the file then posts SEGMENT_DONE, answered by a seek to 0
+            # *without* a flush, so running time (and the stream published to MediaMTX) carries
+            # on across loops; EOS and a flushing seek would restart timestamps at 0, which
+            # HLS muxers reject.
+            # (seek while paused, then PLAYING at once: the pipeline finishes its preroll by
+            # itself; waiting for a second ASYNC_DONE hangs when a sink that does not preroll,
+            # such as the one draining an audio track, is in the pipeline)
+            self._segment_looping = self._segment_seek(Gst.SeekFlags.FLUSH)
+            self._start_phase = "playing"
+            self.pipeline.set_state(Gst.State.PLAYING)
+        elif t == Gst.MessageType.SEGMENT_DONE:
+            self.loops += 1
+            self._discontinuity = True
+            if not self._segment_seek(Gst.SeekFlags.NONE):
+                self.stop("error")
         elif t == Gst.MessageType.EOS:
-            if self.url.startswith("file://") and self.loop_files:
+            if self._loops_file:  # the demuxer could not do segment seeks: flushing fallback
                 self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
+                self.loops += 1
                 self._next_due = None
                 self._discontinuity = True
             else:
                 self.stop("ended")
+
+    @property
+    def _loops_file(self) -> bool:
+        return self.url.startswith("file://") and self.loop_files
+
+    def _segment_seek(self, flush) -> bool:
+        # Known limit: GStreamer starts each pass at the previous pass's last *decode* time.
+        # With B-frames the last frames are *displayed* a little later, so they overlap the
+        # next pass by a frame or two. Analytics and clips handle that; MediaMTX's HLS muxer
+        # does not, so files published for viewing should have no B-frames (README).
+        flags = flush | Gst.SeekFlags.SEGMENT | Gst.SeekFlags.KEY_UNIT
+        return self.pipeline.seek(1.0, Gst.Format.TIME, flags, Gst.SeekType.SET, 0, Gst.SeekType.NONE, -1)
 
     # -------------------------------------------------------------- control
     def run(self, watchdog_s: float = 15.0) -> str:
@@ -433,7 +532,10 @@ class Ingest:
         if threading.current_thread() is threading.main_thread():  # SIGTERM from the supervisor
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, self._on_sigterm)
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, self._on_sigterm)
-        if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+        if self._loops_file:
+            self._start_phase = "preroll"  # PAUSED first; _on_message takes it to PLAYING
+        target = Gst.State.PAUSED if self._start_phase == "preroll" else Gst.State.PLAYING
+        if self.pipeline.set_state(target) == Gst.StateChangeReturn.FAILURE:
             self.stats.state, self.stats.error = "error", "pipeline would not start"
             return self.stats.state
         try:
@@ -461,7 +563,7 @@ class Ingest:
         return False
 
     def stop(self, state: str = "stopped") -> None:
-        if self.stats.state not in ("error", "stalled"):
+        if self.stats.state not in ("error", "stalled", "ended", "failed"):  # the first reason stays
             self.stats.state = state
         if self._loop is not None:
             GLib.idle_add(self._loop.quit)

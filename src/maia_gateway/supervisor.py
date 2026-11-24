@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 
 from . import bus
 from .config import CameraProfile, check_camera_id
-from .ingest.process import run_camera
+from .ingest.process import EXIT_ENDED, EXIT_FATAL
+from .ingest.process import main as camera_main
 from .mediamtx import MediaMTX, MediaMTXError
 from .settings import Settings
 
@@ -46,8 +47,23 @@ class Camera:
     last_exit: int | None = None
     error: str | None = None
     relay_pending: bool = False  # the MediaMTX path is not created yet
+    ended: bool = False  # a file source played to its end with loop: false
+    failed: bool = False  # a source that cannot work as configured (see the camera's error)
     relay_tries: int = 0
+    own_path: str | None = None  # the source is this path on our MediaMTX: read it, no relay
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def relayed(self) -> bool:
+        return self.profile.relayed and self.own_path is None
+
+    @property
+    def viewable(self) -> bool:
+        return self.profile.viewable or self.own_path is not None
+
+    @property
+    def mtx_path(self) -> str:
+        return self.own_path or self.id
 
     @property
     def running(self) -> bool:
@@ -95,7 +111,9 @@ class Supervisor:
             if persist:
                 self.r.hset(bus.REGISTRY, camera_id, profile.model_dump_json())
             self.cameras[camera_id] = cam
-            if profile.relayed:
+            if profile.source.startswith(("rtsp://", "rtsps://")):
+                cam.own_path = self.mtx.own_path(profile.source)
+            if cam.relayed:
                 cam.relay_pending = True
                 self._try_relay(cam)
             else:
@@ -128,7 +146,7 @@ class Supervisor:
                 raise KeyError(f"no camera {camera_id}")
             self._stop_process(cam)
             if forget:
-                if cam.profile.relayed and not cam.relay_pending:
+                if cam.relayed and not cam.relay_pending:
                     try:
                         self.mtx.remove(camera_id)
                     except MediaMTXError as exc:
@@ -140,7 +158,7 @@ class Supervisor:
         with self._lock:
             cam = self.cameras[camera_id]
             self._stop_process(cam)
-            cam.restarts, cam.next_start = 0, 0.0
+            cam.restarts, cam.next_start, cam.ended, cam.failed = 0, 0.0, False, False
             if cam.relay_pending:
                 cam.relay_tries = 0
                 self._try_relay(cam)
@@ -153,6 +171,10 @@ class Supervisor:
         stats = json.loads(raw) if raw else {}
         if cam.relay_pending:
             state = "waiting-for-mediamtx"
+        elif cam.ended:
+            state = "ended"
+        elif cam.failed:
+            state = "failed"
         elif cam.running:
             state = stats.get("state", "starting")
         else:
@@ -161,7 +183,9 @@ class Supervisor:
             "id": cam.id,
             "state": state,
             "source": cam.profile.source,
-            "relayed": cam.profile.relayed,
+            "relayed": cam.relayed,
+            "viewable": cam.viewable,
+            "mediamtx_path": cam.mtx_path if cam.viewable else None,
             "decode": cam.decode,
             "gpu": cam.gpu,
             "restarts": cam.restarts,
@@ -195,11 +219,17 @@ class Supervisor:
 
     def _start_process(self, cam: Camera) -> None:
         self.r.delete(bus.STATS.format(cam.id))  # the previous process's final stats
-        url = self.mtx.ingest_url(cam.id) if cam.profile.relayed else cam.profile.source
+        if cam.relayed or cam.own_path:  # read through MediaMTX (works inside Docker, too)
+            url = self.mtx.ingest_url(cam.mtx_path)
+        else:
+            url = cam.profile.source
+        publishes = cam.profile.viewable and not cam.profile.relayed and not cam.own_path
+        publish_url = self.mtx.ingest_url(cam.id) if publishes else None
         profile = cam.profile.model_copy(update={"decode": cam.decode})
+        s = self.settings
         cam.process = _ctx.Process(
-            target=run_camera,
-            args=(cam.id, profile.model_dump_json(), url, self.settings.redis_url, self.settings.clips_dir, cam.gpu),
+            target=camera_main,
+            args=(cam.id, profile.model_dump_json(), url, s.redis_url, s.clips_dir, cam.gpu, publish_url),
             name=f"camera-{cam.id}",
         )
         cam.process.start()
@@ -228,6 +258,14 @@ class Supervisor:
                 for cam in self.cameras.values():
                     if cam.process is not None and not cam.process.is_alive():
                         cam.last_exit = cam.process.exitcode
+                        if cam.last_exit in (EXIT_ENDED, EXIT_FATAL):
+                            # played once as asked, or a source that cannot work (unsupported
+                            # codec): restarting would not change anything
+                            cam.process.close()
+                            cam.process, cam.next_start = None, 0.0
+                            cam.ended, cam.failed = cam.last_exit == EXIT_ENDED, cam.last_exit == EXIT_FATAL
+                            log.info("camera %s %s; not restarting", cam.id, "ended" if cam.ended else "failed")
+                            continue
                         uptime = now - cam.started_at
                         cam.restarts = 0 if uptime > 60 else cam.restarts + 1
                         delay = min(60.0, 2.0 ** min(cam.restarts, 6) / 2)

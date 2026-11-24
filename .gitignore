@@ -7,9 +7,15 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
-# local weights folder at the repo root only (not src/maia_infer/models)
+# local weights folder at the repo root only
 /models/
 *.pt
 *.onnx
 *.engine
 /clips/
+/videos/*
+!/videos/README.txt
+.DS_Store
+# a MediaMTX binary downloaded for local testing (README)
+/mediamtx
+/mediamtx.tar.gz

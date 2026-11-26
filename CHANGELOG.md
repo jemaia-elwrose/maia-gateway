@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5
+- Every event also goes to a Redis stream, `events` (camera, clip id, time, label, meta, clip
+  window), for services that act on events, such as maia-vlm.
+- `POST /clips/<camera>/<clip>/verdicts` attaches a verdict to a clip (also while it records);
+  clips list their `verdicts`, and each goes to a `verdicts` stream. Verdicts annotate: they
+  never change the clip or its events.
+- `examples/detect_from_bus.py` puts the detection's box, confidence and the frame size in
+  each event.
+
 ## 0.1.4
 - Video files as cameras, like VST: `loop: false` plays a file once (the camera then shows
   `ended` and is not restarted); `publish: true` pushes a file or test source into MediaMTX,

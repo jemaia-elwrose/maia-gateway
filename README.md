@@ -294,6 +294,23 @@ an event writes those plus the next `post_s` seconds to an MP4 with a JSON sidec
 labels, your metadata), and announces it on the Redis stream `clips`. An event that arrives
 while a clip is open extends that clip.
 
+## Events and verdicts
+
+`POST /cameras/<id>/events` cuts a clip around the event and also adds it to the `events`
+Redis stream, so other services can act on it. Put the detection in `meta` (`box` in pixels of
+the ring frame, `frame_size`, `conf`), as `examples/detect_from_bus.py` does.
+[maia-vlm](https://github.com/jemaia-elwrose/maia-vlm) follows that stream, checks each event
+with a vision-language model, and posts its verdict back:
+
+```bash
+curl -X POST localhost:8080/clips/demo-video/20261125-180400-c24e44/verdicts \
+     -H 'content-type: application/json' \
+     -d '{"check": "person-present", "verdict": "confirmed", "description": "A person at the counter."}'
+curl localhost:8080/clips/demo-video/20261125-180400-c24e44      # ... "verdicts": [{...}]
+```
+
+Verdicts annotate a clip; they never change or remove it or its events.
+
 ## Native install
 
 GStreamer and its Python bindings come from the system:

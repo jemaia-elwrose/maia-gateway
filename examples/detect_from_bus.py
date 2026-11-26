@@ -11,6 +11,9 @@ appears.
 It stops when the camera ends (a file played once) or on Ctrl+C, and prints a summary,
 including how the frames reached maia-infer (by reference, or resent as pixels).
 
+Each event carries the most confident detection's box and the frame size, so a service
+following the gateway's ``events`` stream (maia-vlm) can check that exact detection.
+
 Replace the event logic with your own use case; the reading and inference stay the same.
 """
 
@@ -48,9 +51,17 @@ def main() -> None:
             found = [d for d in detections(res) if d["name"] == args.label]
             n += 1
             if found and time.time() - last_event > args.cooldown:
+                best = max(found, key=lambda d: d["conf"])
+                h, w = frame.array.shape[:2]
+                meta = {
+                    "count": len(found),
+                    "box": [round(v, 1) for v in best["box"]],  # pixels of this frame: what maia-vlm checks
+                    "conf": round(best["conf"], 3),
+                    "frame_size": [w, h],
+                }
                 event = api.post(
                     f"/cameras/{args.camera}/events",
-                    json={"label": args.label, "at_ns": frame.meta.timestamp_ns, "meta": {"count": len(found)}},
+                    json={"label": args.label, "at_ns": frame.meta.timestamp_ns, "meta": meta},
                 ).json()
                 print(f"{len(found)} x {args.label} -> clip {event.get('clip_id')}")
                 last_event, events = time.time(), events + 1

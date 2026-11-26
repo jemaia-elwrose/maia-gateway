@@ -11,7 +11,9 @@ read it with :class:`FrameStream`:
         ...
 
 Other keys: ``ctl:<camera>`` (commands to a camera's process), ``clips`` (finished clips),
-``gw:stats:<camera>`` (live stats), ``gw:cameras`` (the camera registry).
+``events`` (every event raised, for services that act on them, such as maia-vlm),
+``verdicts`` (what those services concluded), ``gw:stats:<camera>`` (live stats),
+``gw:cameras`` (the camera registry).
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ from maia_ring import Frame, FrameRef, RingPool, StaleFrame
 FRAMES = "frames:{}"
 CONTROL = "ctl:{}"
 CLIPS = "clips"
+EVENTS = "events"  # camera, clip_id, at_ns, label, meta (JSON), clip_start_ns, clip_end_ns
+VERDICTS = "verdicts"  # camera, clip_id, verdict (JSON)
+EVENTS_MAXLEN = 10000
 STATS = "gw:stats:{}"
 REGISTRY = "gw:cameras"
 REPLY = "gw:reply:{}"

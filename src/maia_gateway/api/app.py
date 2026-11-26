@@ -34,7 +34,18 @@ class Event(BaseModel):
     label: str = ""
     #: wall-clock time of the event, ns since the epoch; default: now
     at_ns: int | None = None
+    #: free-form; by convention ``box`` [x1, y1, x2, y2] in pixels of the ring frame,
+    #: ``frame_size`` [width, height] of that frame, ``conf``, ``track``
     meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerdictIn(BaseModel):
+    """What a service such as maia-vlm concluded about an event of this clip."""
+
+    model_config = {"extra": "allow"}
+    check: str = Field(min_length=1, max_length=64)
+    verdict: str = Field(min_length=1, max_length=32)
+    at_ns: int | None = None  # the event it is about
 
 
 def _merge(base: dict, patch: dict) -> dict:
@@ -153,22 +164,62 @@ def create_app(settings: Settings | None = None, supervisor: Supervisor | None =
         cam = camera_or_404(camera_id)
         if not cam.running:
             raise HTTPException(409, "camera is not running")
-        reply = bus.send_command(
-            sup().r, camera_id, "clip", wait_s=3.0, at_ns=event.at_ns, label=event.label, **event.meta
-        )
+        at_ns = event.at_ns or time.time_ns()
+        reply = bus.send_command(sup().r, camera_id, "clip", wait_s=3.0, at_ns=at_ns, label=event.label, **event.meta)
         if reply is None:
             raise HTTPException(504, "camera did not answer")
-        return {"camera": camera_id, **reply, "ready_after_s": cam.profile.clips.post_s}
+        if reply.get("ok"):
+            fields = {
+                "camera": camera_id,
+                "clip_id": reply["clip_id"],
+                "at_ns": str(at_ns),
+                "label": event.label,
+                "meta": json.dumps(event.meta),
+                "clip_start_ns": str(reply["start_ns"]),
+                "clip_end_ns": str(reply["end_ns"]),
+            }
+            try:  # followers of the event stream are optional: never fail the event for them
+                sup().r.xadd(bus.EVENTS, fields, maxlen=bus.EVENTS_MAXLEN, approximate=True)
+            except Exception as exc:
+                log.warning("events stream: %s", exc)
+        return {"camera": camera_id, **reply, "at_ns": at_ns, "ready_after_s": cam.profile.clips.post_s}
 
     def clips_dir() -> Path:
         return Path(settings.clips_dir)
+
+    def verdicts_file(camera_id: str, clip_id: str) -> Path:
+        # its own file, written only here: the camera's process owns the clip's .json
+        return clips_dir() / camera_id / f"{clip_id}.verdicts.jsonl"
+
+    def with_verdicts(clip: dict) -> dict:
+        f = verdicts_file(clip["camera"], clip["id"])
+        clip["verdicts"] = [json.loads(line) for line in f.read_text().splitlines() if line] if f.exists() else []
+        return clip
 
     @app.get("/clips")
     def list_clips(camera: str | None = None, limit: int = 50) -> list[dict]:
         if camera is not None and not CAMERA_ID.match(camera):
             raise HTTPException(422, "bad camera id")
         files = sorted(clips_dir().glob(f"{camera or '*'}/*.json"), key=lambda p: p.name, reverse=True)
-        return [json.loads(p.read_text()) for p in files[:limit]]
+        return [with_verdicts(json.loads(p.read_text())) for p in files[:limit]]
+
+    @app.post("/clips/{camera_id}/{clip_id}/verdicts", status_code=201)
+    def add_verdict(camera_id: str, clip_id: str, verdict: VerdictIn) -> dict:
+        """Attach a verdict to a clip (it may still be recording). Verdicts annotate; they never
+        change or remove the clip or its events."""
+        if not CAMERA_ID.match(camera_id) or not CLIP_ID.match(clip_id) or clip_id.endswith(".mp4"):
+            raise HTTPException(404, "no such clip")
+        record = {"received_ns": time.time_ns(), **verdict.model_dump()}
+        f = verdicts_file(camera_id, clip_id)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as out:
+            out.write(json.dumps(record) + "\n")
+        try:
+            sup().r.xadd(bus.VERDICTS, {"camera": camera_id, "clip_id": clip_id, "verdict": json.dumps(record)},
+                         maxlen=bus.EVENTS_MAXLEN, approximate=True)  # fmt: skip
+        except Exception as exc:
+            log.warning("verdicts stream: %s", exc)
+        return {"camera": camera_id, "clip_id": clip_id, "verdicts": len(f.read_text().splitlines())}
 
     @app.get("/clips/{camera_id}/{clip_id}")
     def get_clip(camera_id: str, clip_id: str):
@@ -183,7 +234,7 @@ def create_app(settings: Settings | None = None, supervisor: Supervisor | None =
         sidecar = video.with_suffix(".json")
         if not sidecar.exists():
             raise HTTPException(404, "no such clip")
-        return json.loads(sidecar.read_text())
+        return with_verdicts(json.loads(sidecar.read_text()))
 
     # ---------------------------------------------------------------- health
     @app.get("/health")

@@ -1,5 +1,6 @@
 """The gateway end to end: API, supervisor, camera processes, Redis frame bus, clips, MediaMTX."""
 
+import json
 import time
 
 import pytest
@@ -120,6 +121,23 @@ def test_events_make_clips(gateway):
     assert 1.5 <= duration <= 3.5
     for bad in ["..%2F..%2Fetc", "synth/..%2F..%2Fsecret.mp4", "synth/x.mp4", "..%2Fsynth/" + clip["id"]]:
         assert client.get(f"/clips/{bad}").status_code == 404
+
+    # the event went to the events stream, for followers such as maia-vlm
+    _, sup = gateway
+    (_, fields), *_ = sup.r.xrevrange("events", count=1)
+    assert fields["clip_id"] == clip["id"] and fields["label"] == "person" and int(fields["at_ns"]) == event["at_ns"]
+    assert json.loads(fields["meta"]) == {"track": 3}
+
+    # a verdict annotates the clip; it never changes the clip or its events
+    v = {"check": "person-present", "verdict": "confirmed", "at_ns": event["at_ns"], "description": "A person."}
+    assert client.post(f"/clips/synth/{clip['id']}/verdicts", json=v).json()["verdicts"] == 1
+    got = client.get(f"/clips/synth/{clip['id']}").json()
+    assert got["verdicts"][0]["description"] == "A person." and got["events"] == clip["events"]
+    assert client.get("/clips?camera=synth").json()[0]["verdicts"][0]["check"] == "person-present"
+    (_, vf), *_ = sup.r.xrevrange("verdicts", count=1)
+    assert vf["clip_id"] == clip["id"] and json.loads(vf["verdict"])["verdict"] == "confirmed"
+    assert client.post(f"/clips/synth/{clip['id']}/verdicts", json={"verdict": "x"}).status_code == 422
+    assert client.post("/clips/synth/..%2Fx/verdicts", json=v).status_code == 404
 
 
 def test_frame_bus_newest_every_and_groups(gateway, redis_url):

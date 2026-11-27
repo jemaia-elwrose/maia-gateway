@@ -5,7 +5,7 @@ read it with :class:`FrameStream`:
 
     frames = FrameStream("gate-1")
     for frame in frames.follow():          # newest frame each time, skipping what it missed
-        boxes = client.infer("yolo", frame)  # by reference: the worker reads the ring in place
+        boxes = client.infer("rfdetr", frame)  # by reference: the worker reads the ring in place
 
     for frame in frames.follow(group="counting", consumer="a"):  # replicas share the frames
         ...

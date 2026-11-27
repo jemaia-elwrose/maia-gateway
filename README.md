@@ -105,7 +105,7 @@ frames = FrameStream("gate-1")  # Redis at localhost:6379 by default
 client = Client("tcp://localhost:5555")
 
 for frame in frames.follow():  # the newest frame each time
-    res = client.infer("yolo", frame)  # by reference: the worker reads the ring
+    res = client.infer("rfdetr", frame)  # by reference: the worker reads the ring
     for d in detections(res):
         print(frame.meta.frame_index, d["name"], d["conf"])
 ```

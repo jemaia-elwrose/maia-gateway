@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+- `examples/detect_from_bus.py` uses maia-infer's RF-DETR worker by default (`--service`,
+  Apache-2.0); `--service yolo` for Ultralytics YOLO (AGPL-3.0). `[infer]` pins maia-infer 0.5.0.
+- The version is written once, in `maia_gateway/__init__.py`; `pyproject.toml` reads it.
+
 ## 0.1.5
 - Every event also goes to a Redis stream, `events` (camera, clip id, time, label, meta, clip
   window), for services that act on events, such as maia-vlm.

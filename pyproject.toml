@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maia-gateway"
-version = "0.1.5"
+dynamic = ["version"]
 description = "Open camera gateway for video analytics: GStreamer ingest, hardware decode, a shared-memory frame bus, event clips and a control API."
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,11 +24,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-infer = ["maia-infer @ git+https://github.com/jemaia-elwrose/maia-infer@v0.4.2"]
+infer = ["maia-infer @ git+https://github.com/jemaia-elwrose/maia-infer@v0.5.0"]
 dev = ["pytest>=8", "ruff==0.17.5"]
 
 [project.scripts]
 maia-gateway = "maia_gateway.cli:main"
+
+[tool.hatch.version]
+path = "src/maia_gateway/__init__.py"  # the one place the version is written
 
 [tool.hatch.metadata]
 allow-direct-references = true

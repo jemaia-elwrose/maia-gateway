@@ -1,11 +1,11 @@
 """A minimal analytics pipeline on top of the gateway: read a camera's newest frame from the
-frame bus, run YOLO on it through maia-infer *by reference* (the worker reads the frame
+frame bus, run a detector (RF-DETR by default) on it through maia-infer *by reference* (the worker reads the frame
 in place, no pixels are copied), and raise an event, which cuts a clip, when a person
 appears.
 
     docker compose up                                   # the gateway stack (or maia-gateway serve)
     maia-infer broker                                   # terminal 2
-    maia-infer worker yolo                              # terminal 3 (pip install "maia-infer[yolo]")
+    maia-infer worker rfdetr                            # terminal 3 (pip install "maia-infer[rfdetr]")
     python examples/detect_from_bus.py --camera sim-1 --label person
 
 It stops when the camera ends (a file played once) or on Ctrl+C, and prints a summary,
@@ -33,6 +33,7 @@ def main() -> None:
     ap.add_argument("--redis", default="redis://localhost:6379/0")
     ap.add_argument("--api", default="http://localhost:8080")
     ap.add_argument("--infer", default="tcp://localhost:5555")
+    ap.add_argument("--service", default="rfdetr", help="maia-infer detection worker: rfdetr or yolo")
     ap.add_argument("--cooldown", type=float, default=30, help="seconds between events")
     args = ap.parse_args()
 
@@ -44,7 +45,7 @@ def main() -> None:
     try:
         for frame in frames.follow():  # newest frame each time: a slow model skips, never lags
             try:
-                res = client.infer("yolo", frame, meta={"conf": 0.4})
+                res = client.infer(args.service, frame, meta={"conf": 0.4})
             except StaleFrameError:
                 stale += 1
                 continue  # the ring moved on while the frame was queued: take the next one
